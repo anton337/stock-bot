@@ -52,6 +52,87 @@ float fabs(float a)
   return (a>0)?a:-a;
 }
 
+struct Point
+{
+  float t;
+  float x,y;
+  Point(float _x,float _y):x(_x),y(_y){}
+  float dist(Point const & a,float alpha)
+  {
+    return pow(sqrt((x-a.x)*(x-a.x) + (y-a.y)*(y-a.y)),alpha);
+  }
+};
+
+float total_dist(std::vector<Point> & pts,float alpha = 1)
+{
+  float temp_dist;
+  float total_dist = 0;
+  pts[0].t = total_dist;
+  for(int i=1;i<pts.size();i++)
+  {
+    temp_dist = pts[i].dist(pts[i-1],alpha);
+    total_dist += temp_dist;
+    pts[i].t = total_dist;
+  }
+}
+
+int find(std::vector<Point> & pts,float t)
+{
+  for(int i=1;i<pts.size();i++)
+  {
+    if(pts[i].t > t)return i-1;
+  }
+}
+
+Point CatmulRom(std::vector<Point> & pts,float t)
+{
+  int ind0 = (int)find(pts,t)-1;
+  int ind1 = (int)find(pts,t);
+  int ind2 = (int)find(pts,t)+1;
+  int ind3 = (int)find(pts,t)+2;
+  //std::cout << pts[ind1].t << "\t" << pts[ind1].x << "\t" << pts[ind1].y << std::endl;
+  //std::cout << "$$$$$" << ind1 << std::endl;
+  if(ind0<0)ind0 = 0;
+  if(ind1<0)ind1 = 0;
+  if(ind2<0)ind2 = 0;
+  if(ind3<0)ind3 = 0;
+  if(ind0>=pts.size())ind0 = pts.size()-1;
+  if(ind1>=pts.size())ind1 = pts.size()-1;
+  if(ind2>=pts.size())ind2 = pts.size()-1;
+  if(ind3>=pts.size())ind3 = pts.size()-1;
+  //std::cout << t << "~~~~" << pts[ind0].t << '\t' << pts[ind1].t << '\t' << pts[ind2].t << '\t' << pts[ind3].t << std::endl;
+  //std::cout << "^^^^" << pts[ind0].x << '\t' << pts[ind1].x << '\t' << pts[ind2].x << '\t' << pts[ind3].x << std::endl;
+  float d10 = pts[ind1].t - pts[ind0].t;
+  float d21 = pts[ind2].t - pts[ind1].t;
+  float d32 = pts[ind3].t - pts[ind2].t;
+  float A1x = (d10>1e-5)?(pts[ind0].x*(pts[ind1].t-t) + pts[ind1].x*(t-pts[ind0].t))/d10:pts[ind0].x;
+  float A1y = (d10>1e-5)?(pts[ind0].y*(pts[ind1].t-t) + pts[ind1].y*(t-pts[ind0].t))/d10:pts[ind0].y;
+  float A2x = (d21>1e-5)?(pts[ind1].x*(pts[ind2].t-t) + pts[ind2].x*(t-pts[ind1].t))/d21:pts[ind1].x;
+  float A2y = (d21>1e-5)?(pts[ind1].y*(pts[ind2].t-t) + pts[ind2].y*(t-pts[ind1].t))/d21:pts[ind1].y;
+  float A3x = (d32>1e-5)?(pts[ind2].x*(pts[ind3].t-t) + pts[ind3].x*(t-pts[ind2].t))/d32:pts[ind2].x;
+  float A3y = (d32>1e-5)?(pts[ind2].y*(pts[ind3].t-t) + pts[ind3].y*(t-pts[ind2].t))/d32:pts[ind2].y;
+  //std::cout << "^^^" << A1x << '\t' << A2x << '\t' << A3x << std::endl;
+  float d20 = pts[ind2].t - pts[ind0].t;
+  float d31 = pts[ind3].t - pts[ind1].t;
+  float B1x = (d20>1e-5)?(A1x*(pts[ind2].t-t) + A2x*(t-pts[ind0].t))/d20:A1x;
+  float B1y = (d20>1e-5)?(A1y*(pts[ind2].t-t) + A2y*(t-pts[ind0].t))/d20:A1y;
+  float B2x = (d31>1e-5)?(A2x*(pts[ind3].t-t) + A3x*(t-pts[ind1].t))/d31:A2x;
+  float B2y = (d31>1e-5)?(A2y*(pts[ind3].t-t) + A3y*(t-pts[ind1].t))/d31:A2y;
+  //std::cout << "^^" << B1x << '\t' << B2x << std::endl;
+  float Cx  = (d21>1e-5)?(B1x*(pts[ind2].t-t) + B2x*(t-pts[ind1].t))/d21:B1x;
+  float Cy  = (d21>1e-5)?(B1y*(pts[ind2].t-t) + B2y*(t-pts[ind1].t))/d21:B1y;
+  //std::cout << "^" << Cx << "\t" << Cy << std::endl;
+  return Point(Cx,Cy);
+}
+
+
+Point estimate_derivative(std::vector<Point> & pts,float a,float dx)
+{
+  Point p1 = CatmulRom(pts,a-dx);
+  Point p2 = CatmulRom(pts,a+dx);
+  return Point((p2.x-p1.x)/(2*dx),(p2.y-p1.y)/(2*dx));
+}
+
 struct price
 {
 
@@ -538,7 +619,6 @@ struct price
   float ems_26;
   float MACD_line;
   float MACD_signal;
-  float MACD_center;
   float MACD_dline;
   float MACD_dsignal;
   bool MACD_uptrend;
@@ -553,17 +633,11 @@ struct price
       {
         MACD_line = (ema_12 - ema_26)/(ema_26+1);
         MACD_signal = calculate_ema_macd(prices,N);
-        MACD_center = calculate_ema_macd1(prices,200);
-        MACD_dline = MACD_line - prices[index-1].MACD_line;
-        MACD_dsignal = MACD_signal - prices[index-1].MACD_signal;
       }
       else
       {
         MACD_line = 0;
         MACD_signal = 0;
-        MACD_center = 0;
-        MACD_dline = 0;
-        MACD_dsignal = 0;
       }
     }
     else
@@ -572,10 +646,45 @@ struct price
       ema_26 = close;
       MACD_line = 0;
       MACD_signal = 0;
-      MACD_center = 0;
-      MACD_dline = 0;
-      MACD_dsignal = 0;
     }
+  }
+  static void calculate_MACD_dsignal(std::vector<price> & prices)
+  {
+    //char ch;
+    //std::cout << "pass 1" << std::endl;
+    std::vector<Point> pts;
+    for(int i=0;i<prices.size();i++)
+    {
+      pts.push_back(Point(1000*prices[i].MACD_line,1000*prices[i].MACD_signal));
+      //std::cout << pts[i].x << "\t" << pts[i].y << std::endl;
+    }
+    //std::cin >> ch;
+    //std::cout << "pass 2" << std::endl;
+    total_dist(pts,0.5);
+    //total_dist(pts,0.0);
+    //for(int i=0;i<prices.size();i++)
+    //{
+      //std::cout << pts[i].t << "\t" << pts[i].x << "\t" << pts[i].y << std::endl;
+    //}
+    //std::cout << "pass 3" << std::endl;
+    //std::cin >> ch;
+    prices[0].MACD_dline   = 0.0001;
+    prices[0].MACD_dsignal = 0.0001;
+    for(int i=0;i+1<pts.size();i++)
+    {
+      //std::cout << "i=" << i << "\t" << pts[i].t << std::endl;
+      //Point pt = CatmulRom(pts,0.5f*(pts[i].t+pts[i+1].t));
+      //Point drv = estimate_derivative(pts,0.5f*(pts[i].t+pts[i+1].t),0.01);
+      Point drv = estimate_derivative(pts,pts[i].t,0.01);
+      prices[i+1].MACD_dline = drv.x;
+      prices[i+1].MACD_dsignal = drv.y;
+      //prices[i+1].MACD_dline = pt.x;
+      //prices[i+1].MACD_dsignal = pt.y;
+      //prices[i+1].MACD_dline = pts[i].x;
+      //prices[i+1].MACD_dsignal = pts[i].y;
+    }
+    //std::cin >> ch;
+    //std::cout << "pass 4" << std::endl;
   }
   void calculate_MACD_uptrend(std::vector<price> & prices,int N1=12,int N2=26)
   {
@@ -629,6 +738,7 @@ struct price
     {
       prices[i].calculate_MACD_signal(prices,N,N1,N2);
     }
+    calculate_MACD_dsignal(prices);
   }
 
   // DOJI - open and close price are very similar
@@ -854,7 +964,7 @@ struct Scanner
 };
 
 bool comparator(price a,price b){return a.close < b.close;}
-bool comparator_MACD(price a,price b){return a.MACD_line < b.MACD_line;}
+bool comparator_MACD(price a,price b){return a.MACD_dline < b.MACD_dline;}
 bool comparator_low(price a,price b){return a.low < b.low;}
 bool comparator_high(price a,price b){return a.high < b.high;}
 
@@ -1073,29 +1183,11 @@ void read_data_yahoo(std::string filename,std::vector<price> & prices)
   }
 }
 
-struct Point
-{
-  int index;
-  float price;
-};
-
-struct Line
-{
-  Point first;
-  Point last;
-};
-
-struct Trend
-{
-  std::vector<Line> line;
-};
-
 bool buy_only = false;
 Scanner scanner;
 
 std::vector<std::vector<price> > prices;
 std::vector<std::string> symbols;
-std::vector<Trend> trends;
 
 int width  = 1800;
 int height = 1000;
@@ -1169,9 +1261,10 @@ void draw()
   float Bollinger_sigma = 1.0f;
   float vmin    = float(std::min_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_low )->low);
   float vmax    = float(std::max_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_high)->high);
-  float MACD_min= float(std::min_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_MACD)->MACD_line);
-  float MACD_max= float(std::max_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_MACD)->MACD_line);
+  float MACD_min= float(std::min_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_MACD)->MACD_dline);
+  float MACD_max= float(std::max_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_MACD)->MACD_dline);
   float MACD_cmp= max(fabs(MACD_min),fabs(MACD_max));
+  //std::cout << MACD_min << "\t" << MACD_max << std::endl;
   float vfactor = 2.0f/(vmax-vmin);
   float vfactor_volume = 2.0f/float(std::max_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_volume)->volume);
 
@@ -1194,21 +1287,22 @@ void draw()
     end_index = price_index;
     pick_end_index = false;
   }
+  float chart_size = 0.05f;
   glBegin(GL_LINES);
   // MACD spiral axis 
   glColor3f(1.0,1.0,1.0);
-  glVertex3f(-0.1f+ 0.1f+-1.0f+2.0f*mouse_x/width,-0.1f      +1.0f-2.0f*mouse_y/height,0);
-  glVertex3f(-0.1f+-0.1f+-1.0f+2.0f*mouse_x/width,-0.1f      +1.0f-2.0f*mouse_y/height,0);
-  glVertex3f(-0.1f      +-1.0f+2.0f*mouse_x/width,-0.1f+ 0.1f+1.0f-2.0f*mouse_y/height,0);
-  glVertex3f(-0.1f      +-1.0f+2.0f*mouse_x/width,-0.1f+-0.1f+1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size+ chart_size+-1.0f+2.0f*mouse_x/width,-chart_size            +1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size+-chart_size+-1.0f+2.0f*mouse_x/width,-chart_size            +1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size            +-1.0f+2.0f*mouse_x/width,-chart_size+ chart_size+1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size            +-1.0f+2.0f*mouse_x/width,-chart_size+-chart_size+1.0f-2.0f*mouse_y/height,0);
   glEnd();
   glBegin(GL_LINES);
   // MACD current state
   glColor3f(1.0,1.0,1.0);
-  glVertex3f(-0.1f+0.1f*prices[stock_index][price_index].MACD_line/MACD_cmp+ 0.01f+-1.0f+2.0f*mouse_x/width,-0.1f+0.1f*(prices[stock_index][price_index].MACD_signal)/MACD_cmp       +1.0f-2.0f*mouse_y/height,0);
-  glVertex3f(-0.1f+0.1f*prices[stock_index][price_index].MACD_line/MACD_cmp+-0.01f+-1.0f+2.0f*mouse_x/width,-0.1f+0.1f*(prices[stock_index][price_index].MACD_signal)/MACD_cmp       +1.0f-2.0f*mouse_y/height,0);
-  glVertex3f(-0.1f+0.1f*prices[stock_index][price_index].MACD_line/MACD_cmp       +-1.0f+2.0f*mouse_x/width,-0.1f+0.1f*(prices[stock_index][price_index].MACD_signal)/MACD_cmp+ 0.01f+1.0f-2.0f*mouse_y/height,0);
-  glVertex3f(-0.1f+0.1f*prices[stock_index][price_index].MACD_line/MACD_cmp       +-1.0f+2.0f*mouse_x/width,-0.1f+0.1f*(prices[stock_index][price_index].MACD_signal)/MACD_cmp+-0.01f+1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].MACD_dline/MACD_cmp+ 0.01f+-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*(prices[stock_index][price_index].MACD_dsignal)/MACD_cmp       +1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].MACD_dline/MACD_cmp+-0.01f+-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*(prices[stock_index][price_index].MACD_dsignal)/MACD_cmp       +1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].MACD_dline/MACD_cmp       +-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*(prices[stock_index][price_index].MACD_dsignal)/MACD_cmp+ 0.01f+1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].MACD_dline/MACD_cmp       +-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*(prices[stock_index][price_index].MACD_dsignal)/MACD_cmp+-0.01f+1.0f-2.0f*mouse_y/height,0);
   glEnd();
   glBegin(GL_LINES);
   // MACD spiral
@@ -1219,8 +1313,8 @@ void draw()
     {
       glColor4f(1,1,1,0.5f);
     }
-    glVertex3f(-0.1f+0.1f*prices[stock_index][size-i+1].MACD_line/MACD_cmp+-1.0f+2.0f*mouse_x/width,-0.1f+0.1f*(prices[stock_index][size-i+1].MACD_signal)/MACD_cmp+1.0f-2.0f*mouse_y/height,0);
-    glVertex3f(-0.1f+0.1f*prices[stock_index][size-i  ].MACD_line/MACD_cmp+-1.0f+2.0f*mouse_x/width,-0.1f+0.1f*(prices[stock_index][size-i  ].MACD_signal)/MACD_cmp+1.0f-2.0f*mouse_y/height,0);
+    glVertex3f(-chart_size+chart_size*prices[stock_index][size-i+1].MACD_dline/MACD_cmp+-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*(prices[stock_index][size-i+1].MACD_dsignal)/MACD_cmp+1.0f-2.0f*mouse_y/height,0);
+    glVertex3f(-chart_size+chart_size*prices[stock_index][size-i  ].MACD_dline/MACD_cmp+-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*(prices[stock_index][size-i  ].MACD_dsignal)/MACD_cmp+1.0f-2.0f*mouse_y/height,0);
   }
   glEnd();
 
@@ -1252,11 +1346,11 @@ void draw()
     glVertex3f(1.0f-(i+1)*factor,-0.2f+0.1f*vfactor_volume*prices[stock_index][size-i  ].EMAV  ,0);
 
     // MACD
-    glVertex3f(1.0f- i   *factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i+1].MACD_line/MACD_cmp),0);
-    glVertex3f(1.0f-(i+1)*factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i  ].MACD_line/MACD_cmp),0);
+    glVertex3f(1.0f- i   *factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i+1].MACD_dline/MACD_cmp),0);
+    glVertex3f(1.0f-(i+1)*factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i  ].MACD_dline/MACD_cmp),0);
     glColor3f(1,0,0);
-    glVertex3f(1.0f- i   *factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i+1].MACD_signal/MACD_cmp),0);
-    glVertex3f(1.0f-(i+1)*factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i  ].MACD_signal/MACD_cmp),0);
+    glVertex3f(1.0f- i   *factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i+1].MACD_dsignal/MACD_cmp),0);
+    glVertex3f(1.0f-(i+1)*factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i  ].MACD_dsignal/MACD_cmp),0);
     glColor3f(1,1,1);
     glVertex3f(1.0f- i   *factor,-0.4f+0.1f*vfactor400*(300+0),0);
     glVertex3f(1.0f-(i+1)*factor,-0.4f+0.1f*vfactor400*(300+0),0);

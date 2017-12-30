@@ -9,6 +9,7 @@
 #include <boost/filesystem.hpp>
 #include <GL/glut.h>
 #include <math.h>
+#include <map>
 #include <set>
 
 /*
@@ -1184,10 +1185,99 @@ void read_data_yahoo(std::string filename,std::vector<price> & prices)
 }
 
 bool buy_only = false;
+bool game_mode = false;
 Scanner scanner;
 
 std::vector<std::vector<price> > prices;
 std::vector<std::string> symbols;
+std::vector<int> rsymbols;
+int start_date_index = 0;
+int   end_date_index = 0;
+
+struct Symbol
+{
+  int index;
+  std::string name;
+  float units;
+  float buy_price;
+  Symbol(float _units,float _buy_price,std::string _name,int _index)
+    : units(_units)
+    , buy_price(_buy_price)
+    , name(_name)
+    , index(_index)
+  {
+
+  }
+  Symbol()
+    : units(0)
+    , buy_price(0)
+    , name("")
+    , index(-1)
+  {
+
+  }
+};
+
+struct User
+{
+  std::string name;
+  float cash;
+  std::map<int,Symbol> rstocks;
+  User(std::string _name,float _cash,std::vector<int> & _rsymbol)
+  {
+    name = _name;
+    cash = _cash;
+    for(int i=0;i<_rsymbol.size();i++)
+    {
+      initialize(_rsymbol[i]);
+    }
+  }
+  void initialize(int symbol)
+  {
+    rstocks.insert(std::pair<int,Symbol>(symbol,Symbol(0,0,symbols[symbol],symbol)));
+  }
+  bool buyAll(int symbol,int date_index) // date_index counts backwards from last possible date
+  {
+    buy(symbol,cash/prices[symbol][prices[symbol].size()-1-date_index].high,date_index);
+  }
+  bool sellAll(int symbol,int date_index) // date_index counts backwards from last possible date
+  {
+    sell(symbol,rstocks[symbol].units,date_index);
+  }
+  bool buy(int symbol,float units,int date_index) // date_index counts backwards from last possible date
+  {
+    std::cout << prices[symbol][prices[symbol].size()-1-date_index].date << ": User <" << name << "> attempting to buy " << units << " of " << symbols[symbol] << "." << std::endl;
+    std::cout << "Available cash: $" << cash << std::endl;
+    std::cout << symbols[symbol] << " price: $" << prices[symbol][prices[symbol].size()-1-date_index].high << std::endl;
+    std::cout << "Units: " << units << std::endl;
+    std::cout << "Total price: $" << (units * prices[symbol][prices[symbol].size()-1-date_index].high) << std::endl;
+    if(units * prices[symbol][prices[symbol].size()-1-date_index].high <= cash+1e5 && units > 1e-5 && cash > 1e-5)
+    {
+      std::cout << "Buy successful" << std::endl;
+      cash -= units * prices[symbol][prices[symbol].size()-1-date_index].high;
+      rstocks [symbol] . units += units;
+      rstocks [symbol] . buy_price = prices[symbol][prices[symbol].size()-1-date_index].high;
+      return true;
+    }
+    return false;
+  }
+  bool sell(int symbol,float units,int date_index) // date_index counts backwards from last possible date
+  {
+    std::cout << prices[symbol][prices[symbol].size()-1-date_index].date << ": User <" << name << "> attempting to sell " << units << " of " << symbols[symbol] << "." << std::endl;
+    std::cout << symbols[symbol] << " price: $" << prices[symbol][prices[symbol].size()-1-date_index].low << std::endl;
+    std::cout << "Units: " << units << std::endl;
+    std::cout << "Total price: $" << (units * prices[symbol][prices[symbol].size()-1-date_index].low) << std::endl;
+    if(rstocks [symbol] . units >= units-1e-5 && units > 1e-5 && rstocks[symbol] . units > 1e-5)
+    {
+      std::cout << "Sell successful" << std::endl;
+      cash += units * prices[symbol][prices[symbol].size()-1-date_index].low;
+      rstocks [symbol] . units -= units;
+      rstocks [symbol] . buy_price = prices[symbol][prices[symbol].size()-1-date_index].low;
+      return true;
+    }
+    return false;
+  }
+};
 
 int width  = 1800;
 int height = 1000;
@@ -1213,23 +1303,46 @@ void drawString (void * font, char const *s, float x, float y, float z)
      }
 }
 
+User * user = NULL;
+
 void draw()
 {
   glColor3f(1,1,1);
   drawString(GLUT_BITMAP_HELVETICA_18,symbols[stock_index].c_str(),-0.6,0.9,0);
+  if(user)
+  {
+    {
+      std::stringstream ss;
+      ss << "Cash: $" << user->cash;
+      drawString(GLUT_BITMAP_HELVETICA_18,ss.str().c_str(),-0.6,0.85,0);
+    }
+    std::map<int,Symbol>::iterator it = user->rstocks.begin();
+    int i = 0;
+    while(it != user->rstocks.end())
+    {
+      if(it->second.index == stock_index)glColor3f(0,1,0);else glColor3f(1,1,1);
+      std::stringstream ss;
+      ss << it->second.name << "   " << it->second.units;
+      drawString(GLUT_BITMAP_HELVETICA_18,ss.str().c_str(),-0.6,0.8-i*0.05,0);
+      ++it;
+      ++i;
+    }
+  }
   drawString(GLUT_BITMAP_HELVETICA_18,"Volume",-1,-0.10,0);
   drawString(GLUT_BITMAP_HELVETICA_18,"MACD",-1,-0.30,0);
   drawString(GLUT_BITMAP_HELVETICA_18,"RSI",-1,-0.50,0);
   drawString(GLUT_BITMAP_HELVETICA_18,"MFI",-1,-0.70,0);
   drawString(GLUT_BITMAP_HELVETICA_18,"CCI",-1,-0.90,0);
-  int n = prices[stock_index].size()*view_fraction;
-  int size = prices[stock_index].size()-1;
+  //int n = prices[stock_index].size()*view_fraction;
+  int n = start_date_index - end_date_index;
+  int size = prices[stock_index].size()-1-end_date_index;
   float open_price = 0;
   float close_price = 0;
   float high_price = 0;
   float low_price = 0;
   std::string date = "";
-  int price_index = (int)((size*(1.0f-view_fraction))+(((float)mouse_x/width)*(size*view_fraction))-0.5f) + 2;
+  //int price_index = (int)((size*(1.0f-view_fraction))+(((float)mouse_x/width)*(size*view_fraction))-0.5f) + 2;
+  int price_index = (int)((size-n)+(((float)mouse_x/width)*(n))-0.5f) + 1;
   if(price_index>=0&&price_index<prices[stock_index].size())
   {
     open_price = prices[stock_index][price_index].open;
@@ -1254,19 +1367,20 @@ void draw()
   drawString(GLUT_BITMAP_HELVETICA_18,ss_high_price.str().c_str(),-1.0f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.05f,0);
   drawString(GLUT_BITMAP_HELVETICA_18,ss_low_price.str().c_str(),-1.0f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.00f,0);
   VolumeByPrice vol_by_price;
-  vol_by_price.create_bins(prices[stock_index],12,(int)(size*(1.0f-view_fraction)),size);
-  float factor = 2.0f/n;
+  vol_by_price.create_bins(prices[stock_index],12,(int)(size-n),size);
+  //float factor = 2.0f/n;
+  float factor = 2.0f/(start_date_index - end_date_index);
   float vfactor100 = 2.0f/100.0f;
   float vfactor400 = 2.0f/600.0f;
   float Bollinger_sigma = 1.0f;
-  float vmin    = float(std::min_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_low )->low);
-  float vmax    = float(std::max_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_high)->high);
-  float MACD_min= float(std::min_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_MACD)->MACD_dline);
-  float MACD_max= float(std::max_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_MACD)->MACD_dline);
+  float vmin    = float(std::min_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_low )->low)/1.05f;
+  float vmax    = float(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_high)->high)*1.05f;
+  float MACD_min= float(std::min_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_MACD)->MACD_dline);
+  float MACD_max= float(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_MACD)->MACD_dline);
   float MACD_cmp= max(fabs(MACD_min),fabs(MACD_max));
   //std::cout << MACD_min << "\t" << MACD_max << std::endl;
   float vfactor = 2.0f/(vmax-vmin);
-  float vfactor_volume = 2.0f/float(std::max_element(prices[stock_index].begin()+(int)(size*(1.0f-view_fraction)),prices[stock_index].end(),comparator_volume)->volume);
+  float vfactor_volume = 2.0f/float(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_volume)->volume);
 
   glBegin(GL_LINES);
   // mouse 
@@ -1306,7 +1420,7 @@ void draw()
   glEnd();
   glBegin(GL_LINES);
   // MACD spiral
-  for(int i=1;i<n;i++)
+  for(int i=1;i<start_date_index-end_date_index;i++)
   {
     glColor4f(1,1,1,.2f);
     if(size-i+1>start_index && size-i+1<end_index)
@@ -1335,60 +1449,60 @@ void draw()
   glEnd();
 
   glBegin(GL_LINES);
-  for(int i=1;i<n;i++)
+  for(int i=1,j=0;i<start_date_index-end_date_index;i++,j++)
   {
     glColor3f(1,1,1);
 
     // volume
-    glVertex3f(1.0f- i   *factor,-0.2f+0.1f*vfactor_volume*prices[stock_index][size-i+1].volume,0);
-    glVertex3f(1.0f-(i+1)*factor,-0.2f+0.1f*vfactor_volume*prices[stock_index][size-i  ].volume,0);
-    glVertex3f(1.0f- i   *factor,-0.2f+0.1f*vfactor_volume*prices[stock_index][size-i+1].EMAV  ,0);
-    glVertex3f(1.0f-(i+1)*factor,-0.2f+0.1f*vfactor_volume*prices[stock_index][size-i  ].EMAV  ,0);
+    glVertex3f(1.0f- j   *factor,-0.2f+0.1f*vfactor_volume*prices[stock_index][size-i+1].volume,0);
+    glVertex3f(1.0f-(j+1)*factor,-0.2f+0.1f*vfactor_volume*prices[stock_index][size-i  ].volume,0);
+    glVertex3f(1.0f- j   *factor,-0.2f+0.1f*vfactor_volume*prices[stock_index][size-i+1].EMAV  ,0);
+    glVertex3f(1.0f-(j+1)*factor,-0.2f+0.1f*vfactor_volume*prices[stock_index][size-i  ].EMAV  ,0);
 
     // MACD
-    glVertex3f(1.0f- i   *factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i+1].MACD_dline/MACD_cmp),0);
-    glVertex3f(1.0f-(i+1)*factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i  ].MACD_dline/MACD_cmp),0);
+    glVertex3f(1.0f- j   *factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i+1].MACD_dline/MACD_cmp),0);
+    glVertex3f(1.0f-(j+1)*factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i  ].MACD_dline/MACD_cmp),0);
     glColor3f(1,0,0);
-    glVertex3f(1.0f- i   *factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i+1].MACD_dsignal/MACD_cmp),0);
-    glVertex3f(1.0f-(i+1)*factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i  ].MACD_dsignal/MACD_cmp),0);
+    glVertex3f(1.0f- j   *factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i+1].MACD_dsignal/MACD_cmp),0);
+    glVertex3f(1.0f-(j+1)*factor,-0.4f+0.1f*vfactor400*(300+100.0f*prices[stock_index][size-i  ].MACD_dsignal/MACD_cmp),0);
     glColor3f(1,1,1);
-    glVertex3f(1.0f- i   *factor,-0.4f+0.1f*vfactor400*(300+0),0);
-    glVertex3f(1.0f-(i+1)*factor,-0.4f+0.1f*vfactor400*(300+0),0);
+    glVertex3f(1.0f- j   *factor,-0.4f+0.1f*vfactor400*(300+0),0);
+    glVertex3f(1.0f-(j+1)*factor,-0.4f+0.1f*vfactor400*(300+0),0);
 
     // RSI
-    glVertex3f(1.0f- i   *factor,-0.6f+0.1f*vfactor100*prices[stock_index][size-i+1].RSI,0);
-    glVertex3f(1.0f-(i+1)*factor,-0.6f+0.1f*vfactor100*prices[stock_index][size-i  ].RSI,0);
-    glVertex3f(1.0f- i   *factor,-0.6f+0.1f*vfactor100*30,0);
-    glVertex3f(1.0f-(i+1)*factor,-0.6f+0.1f*vfactor100*30,0);
-    glVertex3f(1.0f- i   *factor,-0.6f+0.1f*vfactor100*50,0);
-    glVertex3f(1.0f-(i+1)*factor,-0.6f+0.1f*vfactor100*50,0);
-    glVertex3f(1.0f- i   *factor,-0.6f+0.1f*vfactor100*70,0);
-    glVertex3f(1.0f-(i+1)*factor,-0.6f+0.1f*vfactor100*70,0);
+    glVertex3f(1.0f- j   *factor,-0.6f+0.1f*vfactor100*prices[stock_index][size-i+1].RSI,0);
+    glVertex3f(1.0f-(j+1)*factor,-0.6f+0.1f*vfactor100*prices[stock_index][size-i  ].RSI,0);
+    glVertex3f(1.0f- j   *factor,-0.6f+0.1f*vfactor100*30,0);
+    glVertex3f(1.0f-(j+1)*factor,-0.6f+0.1f*vfactor100*30,0);
+    glVertex3f(1.0f- j   *factor,-0.6f+0.1f*vfactor100*50,0);
+    glVertex3f(1.0f-(j+1)*factor,-0.6f+0.1f*vfactor100*50,0);
+    glVertex3f(1.0f- j   *factor,-0.6f+0.1f*vfactor100*70,0);
+    glVertex3f(1.0f-(j+1)*factor,-0.6f+0.1f*vfactor100*70,0);
 
     // MFI
-    glVertex3f(1.0f- i   *factor,-0.8f+0.1f*vfactor100*prices[stock_index][size-i+1].MFI,0);
-    glVertex3f(1.0f-(i+1)*factor,-0.8f+0.1f*vfactor100*prices[stock_index][size-i  ].MFI,0);
-    glVertex3f(1.0f- i   *factor,-0.8f+0.1f*vfactor100*30,0);
-    glVertex3f(1.0f-(i+1)*factor,-0.8f+0.1f*vfactor100*30,0);
-    glVertex3f(1.0f- i   *factor,-0.8f+0.1f*vfactor100*50,0);
-    glVertex3f(1.0f-(i+1)*factor,-0.8f+0.1f*vfactor100*50,0);
-    glVertex3f(1.0f- i   *factor,-0.8f+0.1f*vfactor100*70,0);
-    glVertex3f(1.0f-(i+1)*factor,-0.8f+0.1f*vfactor100*70,0);
+    glVertex3f(1.0f- j   *factor,-0.8f+0.1f*vfactor100*prices[stock_index][size-i+1].MFI,0);
+    glVertex3f(1.0f-(j+1)*factor,-0.8f+0.1f*vfactor100*prices[stock_index][size-i  ].MFI,0);
+    glVertex3f(1.0f- j   *factor,-0.8f+0.1f*vfactor100*30,0);
+    glVertex3f(1.0f-(j+1)*factor,-0.8f+0.1f*vfactor100*30,0);
+    glVertex3f(1.0f- j   *factor,-0.8f+0.1f*vfactor100*50,0);
+    glVertex3f(1.0f-(j+1)*factor,-0.8f+0.1f*vfactor100*50,0);
+    glVertex3f(1.0f- j   *factor,-0.8f+0.1f*vfactor100*70,0);
+    glVertex3f(1.0f-(j+1)*factor,-0.8f+0.1f*vfactor100*70,0);
 
     // CCI
-    glVertex3f(1.0f- i   *factor,-1.0f+0.1f*vfactor400*(300+prices[stock_index][size-i+1].CCI),0);
-    glVertex3f(1.0f-(i+1)*factor,-1.0f+0.1f*vfactor400*(300+prices[stock_index][size-i  ].CCI),0);
-    glVertex3f(1.0f- i   *factor,-1.0f+0.1f*vfactor400*(300+ 100),0);
-    glVertex3f(1.0f-(i+1)*factor,-1.0f+0.1f*vfactor400*(300+ 100),0);
-    glVertex3f(1.0f- i   *factor,-1.0f+0.1f*vfactor400*(300+   0),0);
-    glVertex3f(1.0f-(i+1)*factor,-1.0f+0.1f*vfactor400*(300+   0),0);
-    glVertex3f(1.0f- i   *factor,-1.0f+0.1f*vfactor400*(300+-100),0);
-    glVertex3f(1.0f-(i+1)*factor,-1.0f+0.1f*vfactor400*(300+-100),0);
+    glVertex3f(1.0f- j   *factor,-1.0f+0.1f*vfactor400*(300+prices[stock_index][size-i+1].CCI),0);
+    glVertex3f(1.0f-(j+1)*factor,-1.0f+0.1f*vfactor400*(300+prices[stock_index][size-i  ].CCI),0);
+    glVertex3f(1.0f- j   *factor,-1.0f+0.1f*vfactor400*(300+ 100),0);
+    glVertex3f(1.0f-(j+1)*factor,-1.0f+0.1f*vfactor400*(300+ 100),0);
+    glVertex3f(1.0f- j   *factor,-1.0f+0.1f*vfactor400*(300+   0),0);
+    glVertex3f(1.0f-(j+1)*factor,-1.0f+0.1f*vfactor400*(300+   0),0);
+    glVertex3f(1.0f- j   *factor,-1.0f+0.1f*vfactor400*(300+-100),0);
+    glVertex3f(1.0f-(j+1)*factor,-1.0f+0.1f*vfactor400*(300+-100),0);
   }
   glEnd();
 
   glBegin(GL_QUADS);
-  for(int i=1;i<n;i++)
+  for(int i=1,j=0;i<start_date_index-end_date_index;i++,j++)
   {
     if(prices[stock_index][size-i+1].close>prices[stock_index][size-i].close)
     {
@@ -1399,10 +1513,10 @@ void draw()
       glColor3f(1,0,0);
     }
     // volume
-    glVertex3f(1.0f-(i-0.45f)*factor,-0.25f+0.125f*vfactor_volume*prices[stock_index][size-i+1].volume,0);
-    glVertex3f(1.0f-(i+0.45f)*factor,-0.25f+0.125f*vfactor_volume*prices[stock_index][size-i+1].volume,0);
-    glVertex3f(1.0f-(i+0.45f)*factor,-0.25f,0);
-    glVertex3f(1.0f-(i-0.45f)*factor,-0.25f,0);
+    glVertex3f(1.0f-(j-0.45f)*factor,-0.25f+0.125f*vfactor_volume*prices[stock_index][size-i+1].volume,0);
+    glVertex3f(1.0f-(j+0.45f)*factor,-0.25f+0.125f*vfactor_volume*prices[stock_index][size-i+1].volume,0);
+    glVertex3f(1.0f-(j+0.45f)*factor,-0.25f,0);
+    glVertex3f(1.0f-(j-0.45f)*factor,-0.25f,0);
   }
   glEnd();
 
@@ -1417,50 +1531,50 @@ void draw()
   glEnd();
     
   glBegin(GL_LINES);
-  for(int i=1;i<n;i++)
+  for(int i=1,j=0;i<start_date_index-end_date_index;i++,j++)
   {
     glColor3f(1,1,1);
     // price
-    glVertex3f(1.0f- i   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close-vmin) ,0);
-    glVertex3f(1.0f-(i+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].close-vmin) ,0);
+    glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close-vmin) ,0);
+    glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].close-vmin) ,0);
 
-    glVertex3f(1.0f- i   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_12-vmin) ,0);
-    glVertex3f(1.0f-(i+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_12-vmin) ,0);
+    glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_12-vmin) ,0);
+    glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_12-vmin) ,0);
     for(int b=1;b<=3;b++)
     {
       glColor3f(1.0f/(1+b),1.0f/(1+b),1.0f/(1+b));
-      glVertex3f(1.0f- i   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_12+b*Bollinger_sigma*prices[stock_index][size-i+1].ems_12-vmin) ,0);
-      glVertex3f(1.0f-(i+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_12+b*Bollinger_sigma*prices[stock_index][size-i  ].ems_12-vmin) ,0);
-      glVertex3f(1.0f- i   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_12-b*Bollinger_sigma*prices[stock_index][size-i+1].ems_12-vmin) ,0);
-      glVertex3f(1.0f-(i+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_12-b*Bollinger_sigma*prices[stock_index][size-i  ].ems_12-vmin) ,0);
+      glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_12+b*Bollinger_sigma*prices[stock_index][size-i+1].ems_12-vmin) ,0);
+      glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_12+b*Bollinger_sigma*prices[stock_index][size-i  ].ems_12-vmin) ,0);
+      glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_12-b*Bollinger_sigma*prices[stock_index][size-i+1].ems_12-vmin) ,0);
+      glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_12-b*Bollinger_sigma*prices[stock_index][size-i  ].ems_12-vmin) ,0);
     }
     
-    //glVertex3f(1.0f- i   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_26-vmin) ,0);
-    //glVertex3f(1.0f-(i+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_26-vmin) ,0);
+    //glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_26-vmin) ,0);
+    //glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_26-vmin) ,0);
     //for(int b=1;b<=3;b++)
     //{
     //  glColor3f(1.0f/(1+b),1.0f/(1+b),1.0f/(1+b));
-    //  glVertex3f(1.0f- i   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_26+b*Bollinger_sigma*prices[stock_index][size-i+1].ems_26-vmin) ,0);
-    //  glVertex3f(1.0f-(i+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_26+b*Bollinger_sigma*prices[stock_index][size-i  ].ems_26-vmin) ,0);
-    //  glVertex3f(1.0f- i   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_26-b*Bollinger_sigma*prices[stock_index][size-i+1].ems_26-vmin) ,0);
-    //  glVertex3f(1.0f-(i+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_26-b*Bollinger_sigma*prices[stock_index][size-i  ].ems_26-vmin) ,0);
+    //  glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_26+b*Bollinger_sigma*prices[stock_index][size-i+1].ems_26-vmin) ,0);
+    //  glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_26+b*Bollinger_sigma*prices[stock_index][size-i  ].ems_26-vmin) ,0);
+    //  glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_26-b*Bollinger_sigma*prices[stock_index][size-i+1].ems_26-vmin) ,0);
+    //  glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_26-b*Bollinger_sigma*prices[stock_index][size-i  ].ems_26-vmin) ,0);
     //}
     
-    //glVertex3f(1.0f- i   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_50-vmin) ,0);
-    //glVertex3f(1.0f-(i+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_50-vmin) ,0);
+    //glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_50-vmin) ,0);
+    //glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_50-vmin) ,0);
     //for(int b=1;b<=3;b++)
     //{
     //  glColor3f(1.0f/(1+b),1.0f/(1+b),1.0f/(1+b));
-    //  glVertex3f(1.0f- i   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_50+b*Bollinger_sigma*prices[stock_index][size-i+1].ems_50-vmin) ,0);
-    //  glVertex3f(1.0f-(i+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_50+b*Bollinger_sigma*prices[stock_index][size-i  ].ems_50-vmin) ,0);
-    //  glVertex3f(1.0f- i   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_50-b*Bollinger_sigma*prices[stock_index][size-i+1].ems_50-vmin) ,0);
-    //  glVertex3f(1.0f-(i+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_50-b*Bollinger_sigma*prices[stock_index][size-i  ].ems_50-vmin) ,0);
+    //  glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_50+b*Bollinger_sigma*prices[stock_index][size-i+1].ems_50-vmin) ,0);
+    //  glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_50+b*Bollinger_sigma*prices[stock_index][size-i  ].ems_50-vmin) ,0);
+    //  glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_50-b*Bollinger_sigma*prices[stock_index][size-i+1].ems_50-vmin) ,0);
+    //  glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_50-b*Bollinger_sigma*prices[stock_index][size-i  ].ems_50-vmin) ,0);
     //}
   } 
   glEnd();
 
   glBegin(GL_QUADS);
-  for(int i=1;i<n;i++)
+  for(int i=1,j=0;i<start_date_index-end_date_index;i++,j++)
   {
     if(size-i+1 == price_index)
     {
@@ -1485,15 +1599,15 @@ void draw()
       }
     }
     // price
-    glVertex3f(1.0f-(i-0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].open -vmin) ,0);
-    glVertex3f(1.0f-(i+0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].open -vmin) ,0);
-    glVertex3f(1.0f-(i+0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close-vmin) ,0);
-    glVertex3f(1.0f-(i-0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close-vmin) ,0);
+    glVertex3f(1.0f-(j-0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].open -vmin) ,0);
+    glVertex3f(1.0f-(j+0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].open -vmin) ,0);
+    glVertex3f(1.0f-(j+0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close-vmin) ,0);
+    glVertex3f(1.0f-(j-0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close-vmin) ,0);
 
-    glVertex3f(1.0f-(i-0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].low  -vmin) ,0);
-    glVertex3f(1.0f-(i+0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].low  -vmin) ,0);
-    glVertex3f(1.0f-(i+0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].high -vmin) ,0);
-    glVertex3f(1.0f-(i-0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].high -vmin) ,0);
+    glVertex3f(1.0f-(j-0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].low  -vmin) ,0);
+    glVertex3f(1.0f-(j+0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].low  -vmin) ,0);
+    glVertex3f(1.0f-(j+0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].high -vmin) ,0);
+    glVertex3f(1.0f-(j-0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].high -vmin) ,0);
   }
   glEnd();
 
@@ -1537,17 +1651,35 @@ void init()
   glBlendEquation(GL_FUNC_ADD);
 }
 
+
 void keyboard(unsigned char key,int x,int y)
 {
   switch(key)
   {
+    case 'y': // buy
+      if(game_mode&&user){
+        user->buyAll(stock_index,end_date_index);
+      }
+      break;
+    case 'u': // sell
+      if(game_mode&&user){
+        user->sellAll(stock_index,end_date_index);
+      }
+      break;
+    case ' ':
+      if(start_date_index>0&&end_date_index>0)
+      {
+        start_date_index--;
+          end_date_index--;
+      }
+      break;
     case 'a':
-      if(buy_only==false)
+      if(buy_only==false&&game_mode==false)
       {
         stock_index--;
         if(stock_index<0)stock_index=prices.size()-1;
       }
-      else
+      if(buy_only)
       {
         if(scanner.buy.size()==0)
         {
@@ -1565,15 +1697,33 @@ void keyboard(unsigned char key,int x,int y)
           }
         }
       }
+      if(game_mode)
+      {
+        if(rsymbols.size()==0)
+        {
+          game_mode=false;
+          stock_index--;
+          if(stock_index<0)stock_index=prices.size()-1;
+        }
+        else
+        {
+          while(true)
+          {
+            stock_index--;
+            if(stock_index<0)stock_index=prices.size()-1;
+            if(std::find(rsymbols.begin(),rsymbols.end(),stock_index) != rsymbols.end())break;
+          }
+        }
+      }
       std::cout << symbols[stock_index] << std::endl;
       break;
     case 'd':
-      if(buy_only==false)
+      if(buy_only==false&&game_mode==false)
       {
         stock_index++;
         if(stock_index>=prices.size())stock_index=0;
       }
-      else
+      if(buy_only)
       {
         if(scanner.buy.size()==0)
         {
@@ -1591,7 +1741,46 @@ void keyboard(unsigned char key,int x,int y)
           }
         }
       }
+      if(game_mode)
+      {
+        if(rsymbols.size()==0)
+        {
+          game_mode=false;
+          stock_index++;
+          if(stock_index>=prices.size())stock_index=0;
+        }
+        else
+        {
+          while(true)
+          {
+            stock_index++;
+            if(stock_index>=prices.size())stock_index=0;
+            if(std::find(rsymbols.begin(),rsymbols.end(),stock_index) != rsymbols.end())break;
+          }
+        }
+      }
       std::cout << symbols[stock_index] << std::endl;
+      break;
+    case 'g':
+      game_mode = !game_mode;
+      if(game_mode) 
+      {
+        if(rsymbols.size()==0)
+        {
+          game_mode=false;
+          stock_index++;
+          if(stock_index>=prices.size())stock_index=0;
+        }
+        else
+        {
+          while(true)
+          {
+            stock_index++;
+            if(stock_index>=prices.size())stock_index=0;
+            if(std::find(rsymbols.begin(),rsymbols.end(),stock_index) != rsymbols.end())break;
+          }
+        }
+      }
       break;
     case 'w':view_fraction *= 1.1f;if(view_fraction>1.0f)view_fraction=1.0f;break;
     case 's':view_fraction /= 1.1f;break;
@@ -1641,6 +1830,9 @@ int main(int argc,char ** argv)
   int seed;
   seed = time(0);
   srand(seed);
+
+  start_date_index = 5000 - (rand()%2000);
+    end_date_index = start_date_index - 100;
   
   // list all files in current directory.
   boost::filesystem::path p ("data");
@@ -1660,44 +1852,33 @@ int main(int argc,char ** argv)
     }
   }
 
-
-  //for(int i=0;i<prices[0].size();i++)
-  //{
-  //  std::cout << prices[0][i].close << std::endl;
-  //}
-  //std::cout << "0\n0\n0\n0\n0" << std::endl;
   for(int i=0;i<prices.size();i++)
   {
     price::initialize_indicators(prices[i]);
   }
-  //for(int i=0;i<prices.size();i++)
-  //{
-  //  std::cout << prices[i].close << " " << prices[i].RSI << " " << prices[i].average_gain << " " << prices[i].average_loss << std::endl;
-  //  std::cout << prices[i].RSI << std::endl;
-  //}
-  //std::cout << "0\n0\n0\n0\n0" << std::endl;
-  //for(int i=0;i<prices.size();i++)
-  //{
-  //  std::cout << ((prices[i].MFI_buy)?0.0f:prices[i].close) << std::endl;
-  //}
-  //std::cout << "0\n0\n0\n0\n0" << std::endl;
-  //for(int i=0;i<prices.size();i++)
-  //{
-  //  std::cout << ((prices[i].MFI_sell)?0.0f:prices[i].close) << std::endl;
-  //}
-  //std::cout << "0\n0\n0\n0\n0" << std::endl;
-  //for(int i=0;i<prices.size();i++)
-  //{
-  //  std::cout << ((prices[i].Volume_spike)?0.0f:prices[i].close) << std::endl;
-  //}
-  //std::cout << "0\n0\n0\n0\n0" << std::endl;
-  //for(int i=0;i<prices[0].size();i++)
-  //{
-  //  std::cout << prices[0][i].SMAV << std::endl;
-  //}
-  //std::cout << "0\n0\n0\n0\n0" << std::endl;
 
   scanner.scan(prices,symbols);
+
+  for(int i=0;i<4;i++)
+  {
+    int sym = rand()%symbols.size();
+    while(std::find(rsymbols.begin(),rsymbols.end(),sym)==rsymbols.end()){
+      if(std::find(rsymbols.begin(),rsymbols.end(),sym)==rsymbols.end()){
+        rsymbols.push_back(sym);
+        break;
+      }
+      sym = rand()%symbols.size();
+    }
+  }
+
+  std::cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$" << std::endl;
+  for(int i=0;i<rsymbols.size();i++)
+  {
+    std::cout << symbols[rsymbols[i]] << std::endl;
+  }
+  std::cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$" << std::endl;
+
+  user = new User("Anton Kodochygov",10000,rsymbols);
 
   glutInit(&argc, argv);
   glutInitWindowSize(width,height);

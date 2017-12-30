@@ -1221,6 +1221,7 @@ struct Symbol
 struct User
 {
   std::string name;
+  float prev_cash;
   float cash;
   std::map<int,Symbol> rstocks;
   User(std::string _name,float _cash,std::vector<int> & _rsymbol)
@@ -1234,7 +1235,10 @@ struct User
   }
   void initialize(int symbol)
   {
-    rstocks.insert(std::pair<int,Symbol>(symbol,Symbol(0,0,symbols[symbol],symbol)));
+    //rstocks.insert(std::pair<int,Symbol>(symbol,Symbol(0,0,symbols[symbol],symbol)));
+    std::stringstream ss;
+    ss << "Stock" << (1+rstocks.size());
+    rstocks.insert(std::pair<int,Symbol>(symbol,Symbol(0,0,ss.str(),symbol)));
   }
   bool buyAll(int symbol,int date_index) // date_index counts backwards from last possible date
   {
@@ -1277,6 +1281,19 @@ struct User
     }
     return false;
   }
+  float expected_return(int date_index)
+  {
+    if(cash<1e-5){}
+    else{prev_cash=cash;}
+    float val = cash;
+    std::map<int,Symbol>::iterator it = rstocks.begin();
+    while(it!=rstocks.end())
+    {
+      val += it->second.units * prices[it->second.index][prices[it->second.index].size()-1-date_index].low;
+      ++it;
+    }
+    return val;
+  }
 };
 
 int width  = 1800;
@@ -1308,10 +1325,11 @@ User * user = NULL;
 void draw()
 {
   glColor3f(1,1,1);
-  drawString(GLUT_BITMAP_HELVETICA_18,symbols[stock_index].c_str(),-0.6,0.9,0);
-  if(user)
+  if(!game_mode)drawString(GLUT_BITMAP_HELVETICA_18,symbols[stock_index].c_str(),-0.6,0.9,0);
+  if(user&&game_mode)
   {
     {
+      glColor3f(1,1,1);
       std::stringstream ss;
       ss << "Cash: $" << user->cash;
       drawString(GLUT_BITMAP_HELVETICA_18,ss.str().c_str(),-0.6,0.85,0);
@@ -1320,12 +1338,25 @@ void draw()
     int i = 0;
     while(it != user->rstocks.end())
     {
-      if(it->second.index == stock_index)glColor3f(0,1,0);else glColor3f(1,1,1);
+      if(it->second.index == stock_index&&game_mode)glColor3f(0,1,0);else glColor3f(1,1,1);
       std::stringstream ss;
       ss << it->second.name << "   " << it->second.units;
       drawString(GLUT_BITMAP_HELVETICA_18,ss.str().c_str(),-0.6,0.8-i*0.05,0);
       ++it;
       ++i;
+    }
+    {
+      glColor3f(1,1,1);
+      std::stringstream ss;
+      ss << "expected return: $" << user->expected_return(end_date_index);
+      drawString(GLUT_BITMAP_HELVETICA_18,ss.str().c_str(),-0.6,0.8-i*0.05,0);
+      ++i;
+    }
+    {
+      glColor3f(1,1,1);
+      std::stringstream ss;
+      ss << "percent return: " << (100*(user->expected_return(end_date_index)/user->prev_cash) - 100) << "%";
+      drawString(GLUT_BITMAP_HELVETICA_18,ss.str().c_str(),-0.6,0.8-i*0.05,0);
     }
   }
   drawString(GLUT_BITMAP_HELVETICA_18,"Volume",-1,-0.10,0);
@@ -1361,15 +1392,15 @@ void draw()
   ss_low_price << "Low:" << low_price << std::endl;
   std::stringstream ss_high_price;
   ss_high_price << "High:" << high_price << std::endl;
-  drawString(GLUT_BITMAP_HELVETICA_18,ss_date.str().c_str(),-1.0f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.20f,0);
-  drawString(GLUT_BITMAP_HELVETICA_18,ss_open_price.str().c_str(),-1.0f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.15f,0);
-  drawString(GLUT_BITMAP_HELVETICA_18,ss_close_price.str().c_str(),-1.0f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.10f,0);
-  drawString(GLUT_BITMAP_HELVETICA_18,ss_high_price.str().c_str(),-1.0f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.05f,0);
-  drawString(GLUT_BITMAP_HELVETICA_18,ss_low_price.str().c_str(),-1.0f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.00f,0);
+  drawString(GLUT_BITMAP_HELVETICA_18,ss_date.str().c_str()       ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.20f,0);
+  drawString(GLUT_BITMAP_HELVETICA_18,ss_open_price.str().c_str() ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.15f,0);
+  drawString(GLUT_BITMAP_HELVETICA_18,ss_close_price.str().c_str(),-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.10f,0);
+  drawString(GLUT_BITMAP_HELVETICA_18,ss_high_price.str().c_str() ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.05f,0);
+  drawString(GLUT_BITMAP_HELVETICA_18,ss_low_price.str().c_str()  ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.00f,0);
   VolumeByPrice vol_by_price;
   vol_by_price.create_bins(prices[stock_index],12,(int)(size-n),size);
   //float factor = 2.0f/n;
-  float factor = 2.0f/(start_date_index - end_date_index);
+  float factor = 2.0f/(start_date_index - end_date_index + 1);
   float vfactor100 = 2.0f/100.0f;
   float vfactor400 = 2.0f/600.0f;
   float Bollinger_sigma = 1.0f;

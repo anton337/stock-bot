@@ -1296,6 +1296,66 @@ struct User
   }
 };
 
+struct Robot
+{
+  User * user;
+  void predict(std::vector<bool> const & input, std::vector<bool> & output)
+  {
+
+  }
+  void train(std::vector<bool> const & input, std::vector<bool> const & output)
+  {
+
+  }
+  std::vector<bool> construct_input_vector(price p)
+  {
+    std::vector<bool> input;
+    input.push_back(p.CCI_buy);
+    input.push_back(p.CCI_sell);
+    input.push_back(p.RSI_buy);
+    input.push_back(p.RSI_sell);
+    input.push_back(p.MFI_buy);
+    input.push_back(p.MFI_sell);
+    input.push_back(p.close > p.ema_12+1.5*p.ems_12);
+    input.push_back(p.close < p.ema_12-1.5*p.ems_12);
+    input.push_back(p.MACD_uptrend);
+    input.push_back(p.MACD_downtrend);
+    input.push_back(p.GoldenCross_uptrend);
+    input.push_back(p.GoldenCross_downtrend);
+    input.push_back(p.MACD_dline>0&&p.MACD_dsignal>0);
+    input.push_back(p.MACD_dline<0&&p.MACD_dsignal<0);
+    return input;
+  }
+  std::vector<bool> construct_output_vector(price p,std::vector<price> const & prev)
+  {
+    std::vector<bool> output;
+    for(int i=0;i<2*prev.size();i++)
+    {
+      output.push_back((p.close-prev[i/2].close)/prev[i/2].close > 0.05);
+      output.push_back((p.close-prev[i/2].close)/prev[i/2].close <-0.05);
+    }
+    return output;
+  }
+  void print(price p,std::vector<price> const & prev)
+  {
+    std::cout << p.date << ":";
+    std::vector<bool> input = construct_input_vector(p);
+    std::vector<bool> output = construct_output_vector(p,prev);
+    for(int i=0;i<input.size();i++)
+    {
+      std::cout << ((input[i])?"1":"0");
+    }
+    std::cout << ":";
+    for(int i=0;i<output.size();i++)
+    {
+      std::cout << ((output[i])?"1":"0");
+    }
+    std::cout << std::endl;
+  }
+};
+
+Robot * robot = new Robot();
+
 int width  = 1800;
 int height = 1000;
 
@@ -1642,6 +1702,15 @@ void draw()
   }
   glEnd();
 
+  {
+    std::vector<price> prcs;
+    for(int k=1;k<10;k++)
+    {
+      prcs.push_back(prices[stock_index][size+k]);
+    }
+    robot->print(prices[stock_index][size],prcs);
+  }
+
 }
 
 void display()
@@ -1862,7 +1931,7 @@ int main(int argc,char ** argv)
   seed = time(0);
   srand(seed);
 
-  start_date_index = 5000 - (rand()%2000);
+  start_date_index = 3000 - (rand()%1000);
     end_date_index = start_date_index - 100;
   
   // list all files in current directory.

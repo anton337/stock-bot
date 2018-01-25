@@ -6,7 +6,7 @@ rm -f data/*
 #./get-yahoo-quote.sh MMM
 #./get-yahoo-quote.sh AXP
 #./get-yahoo-quote.sh BA
-#./get-yahoo-quote.sh CAT
+./get-yahoo-quote.sh CAT
 #./get-yahoo-quote.sh CVX
 #./get-yahoo-quote.sh CSCO
 #./get-yahoo-quote.sh KO
@@ -29,7 +29,7 @@ rm -f data/*
 #./get-yahoo-quote.sh V
 #./get-yahoo-quote.sh WMT
 ./get-yahoo-quote.sh MSFT
-#./get-yahoo-quote.sh AAPL
+./get-yahoo-quote.sh AAPL
 #./get-yahoo-quote.sh DIS
 #./get-yahoo-quote.sh GS
 #./get-yahoo-quote.sh IBM
@@ -46,8 +46,8 @@ rm -f data/*
 #./get-yahoo-quote.sh DVN
 #./get-yahoo-quote.sh BABA
 #./get-yahoo-quote.sh AAU
-./get-yahoo-quote.sh GOOG
-./get-yahoo-quote.sh GOOGL
+#./get-yahoo-quote.sh GOOG
+#./get-yahoo-quote.sh GOOGL
 #./get-yahoo-quote.sh HPE
 #./get-yahoo-quote.sh HPQ
 #./get-yahoo-quote.sh TWTR

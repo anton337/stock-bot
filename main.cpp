@@ -13,6 +13,10 @@
 #include <math.h>
 #include <map>
 #include <set>
+#include <fstream>
+#include <string>
+
+using namespace std;
 
 int sample_index = 0;
 
@@ -66,6 +70,11 @@ T dsigmoid(T x,int type)
 
 template < typename T >
 T max(T a,T b)
+{
+    return (a>b)?a:b;
+}
+
+int maxi(int a,int b)
 {
     return (a>b)?a:b;
 }
@@ -761,6 +770,135 @@ struct Perceptron
     long n_layers;
     std::vector<long> n_nodes;
 
+    void dump_to_file(std::string filename)
+    {
+        std::cout << "dump to file:" << filename << std::endl;
+        fstream myfile (filename.c_str());
+        if (myfile.is_open())
+        {
+          myfile << "#n_nodes" << std::endl;
+          myfile << n_nodes.size() << " ";
+          for(int i=0;i<n_nodes.size();i++)
+          {
+            myfile << n_nodes[i] << " ";
+          }
+          myfile << std::endl;
+          myfile << "#bias" << std::endl;
+          for(int layer = 0;layer < n_layers;layer++)
+          {
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+              myfile << (float)weights_bias[layer][i] << " ";
+            }
+            std::cout << " ";
+          }
+          myfile << std::endl;
+          myfile << "#weights" << std::endl;
+          for(int layer = 0;layer < n_layers;layer++)
+          {
+            for(int i=0;i<n_nodes[layer+1];i++)
+            {
+                for(int j=0;j<n_nodes[layer];j++)
+                {
+                    myfile << (float)weights_neuron[layer][i][j] << " ";
+                }
+            }
+          }
+          myfile << std::endl;
+          myfile.close();
+        }
+        else
+        {
+          cout << "Unable to open file: " << filename << std::endl;
+          exit(1);
+        }
+
+    }
+
+    void load_from_file(std::string filename)
+    {
+        std::cout << "loading from file:" << filename << std::endl;
+        ifstream myfile (filename.c_str());
+        if (myfile.is_open())
+        {
+          std::string line;
+          std::string tmp;
+          int stage = 0;
+          bool done = false;
+          while(!done&&getline(myfile,line))
+          {
+            if(line[0] == '#')continue;
+            switch(stage)
+            {
+              case 0: // get n_nodes
+              {
+                std::stringstream ss;
+                ss << line;
+                int n_nodes_size;
+                ss >> tmp;
+                n_nodes_size = atoi(tmp.c_str());
+                if(n_nodes_size != n_nodes.size())
+                {
+                  std::cout << "network structure is not consistent." << std::endl;
+                  exit(1);
+                }
+                for(int i=0;i<n_nodes_size;i++)
+                {
+                  int layer_size;
+                  ss >> tmp;
+                  layer_size = atoi(tmp.c_str());
+                  if(layer_size != n_nodes[i])
+                  {
+                    std::cout << "network structure is not consistent." << std::endl;
+                    exit(1);
+                  }
+                }
+                stage = 1;
+                break;
+              }
+              case 1: // get bias
+              {
+                std::stringstream ss;
+                ss << line;
+                for(int layer = 0;layer < n_layers;layer++)
+                {
+                  for(long i=0;i<n_nodes[layer+1];i++)
+                  {
+                    ss >> tmp;
+                    weights_bias[layer][i] = atof(tmp.c_str());
+                  }
+                  std::cout << " ";
+                }
+                stage = 2;
+                break;
+              }
+              case 2: // get weights
+              {
+                std::stringstream ss;
+                ss << line;
+                for(int layer = 0;layer < n_layers;layer++)
+                {
+                  for(int i=0;i<n_nodes[layer+1];i++)
+                  {
+                      for(int j=0;j<n_nodes[layer];j++)
+                      {
+                          ss >> tmp;
+                          weights_neuron[layer][i][j] = atof(tmp.c_str());
+                      }
+                  }
+                }
+                stage = 3;
+                break;
+              }
+              default:done = true;break;
+            }
+          }
+          myfile.close();
+        }
+        else cout << "Unable to open file: " << filename << std::endl;
+
+    }
+
     T epsilon;
     T alpha;
     int sigmoid_type;
@@ -940,7 +1078,7 @@ struct Perceptron
             g.clear();
 
             static int cnt1 = 0;
-            if(cnt1%1==0)
+            if(cnt1%100==0)
             std::cout << iter << "\tquasi_newton_update=" << quasi_newton->quasi_newton_update << "\ttype=" << sigmoid_type << "\tepsilon=" << epsilon << "\talpha=" << alpha << '\t' << "error=" << error << "\tdiff=" << (error-perror) << "\t\%error=" << 100*error/n_elements << "\tindex=" << index/n_elements << std::endl;
             cnt1++;
             perror = error;
@@ -2063,6 +2201,10 @@ struct price
   double high;
   double low;
   int volume;
+  double prev_close;
+  double prct_change;
+  double prct_prediction;
+  double close_prediction;
 
   // these quantities are derived from the values above
   
@@ -2826,6 +2968,21 @@ struct price
     }
   }
 
+  static void initialize_percent_change(std::vector<price> & prices)
+  {
+    prices[0].prev_close = prices[0].close;
+    prices[0].prct_change = 0;
+    prices[0].close_prediction = prices[0].close;
+    prices[0].prct_prediction = 0;
+    for(int i=1;i<prices.size();i++)
+    {
+      prices[i].prev_close = prices[i-1].close;
+      prices[i].prct_change = (prices[i].close - prices[i-1].close) / prices[i-1].close;
+      prices[i].close_prediction = prices[i-1].close;
+      prices[i].prct_prediction = 0;
+    }
+  }
+
   // initialize all indicators 
   static void initialize_indicators(std::vector<price> & prices,bool awesome_macd)
   {
@@ -2841,6 +2998,7 @@ struct price
     initialize_RSI(prices);
     initialize_MFI(prices);
     initialize_Volume_spike(prices);
+    initialize_percent_change(prices);
   }
 
 };
@@ -3255,11 +3413,11 @@ struct Robot
     //    input.push_back(0/*p.MACD_dline>0&&p.MACD_dsignal>0*/);
     //for(long i=0;i<num_bits;i++)
     //    input.push_back(0/*p.MACD_dline<0&&p.MACD_dsignal<0*/);
-    return input.size()+num_bits*(range-1);
+    return input.size()+num_bits*(range);
   }
   long get_output_size(long range)
   {
-    return num_out_bits;//*(range-1);
+    return num_out_bits*(range-1);
   }
   void encode(std::vector<double> & vec,double dat,double min_dat,double max_dat,long num)
   {
@@ -3279,20 +3437,18 @@ struct Robot
     //encode(input,100*(p.close - p.ema_12)/p.ems_12,-150,150,num_bits);
     //encode(input,p.MACD_dline,-2,2,num_bits);
     //encode(input,p.MACD_dsignal,-2,2,num_bits);
-    encode(input,100*(p.close-prev[0].close)/p.close,-2,2,num_bits);
-    int i=prev.size()-2;
-    for(;i>=0;i--)
+    for(int i=0;i<prev.size();i++)
     {
-      encode(input,100*(prev[i].close-prev[i+1].close)/prev[i].close,-2,2,num_bits);
+      encode(input,100*prev[i].prct_change,-2,2,num_bits);
     }
     return input;
   }
   std::vector<double> construct_output_vector(price p,std::vector<price> const & next)
   {
     std::vector<double> output;
-    for(int i=0;i<1/*next.size()*/;i++)
+    for(int i=0;i<next.size();i++)
     {
-      encode(output,100*(p.close-next[i].close)/p.close,-2,2,num_out_bits);
+      encode(output,100*next[i].prct_change,-2,2,num_out_bits);
     }
     return output;
   }
@@ -3446,6 +3602,65 @@ void drawString (void * font, char const *s, double x, double y, double z)
 
 User * user = NULL;
 
+long learning_samples = 0;
+int input_learning_range = 26;
+int output_learning_range = 2;
+int synthetic_range = 20;
+int learning_offset = 1;
+int learning_num = 3000;
+double *  in_dump = NULL;
+double * out_dump = NULL;
+double * prd_dump = NULL;
+
+Perceptron<double> * perceptron = NULL;
+
+void reconstruct(std::vector<price> & prices,int index)
+{
+    if ( perceptron != NULL 
+      && in_dump 
+      && out_dump 
+      && prices[index].synthetic == false 
+      && index+     synthetic_range*learning_offset<prices.size() 
+      && index-input_learning_range*learning_offset>=0
+       )
+    {
+      int  in_size = robot-> get_input_size( input_learning_range);
+      int out_size = robot->get_output_size(output_learning_range);
+      {
+        for(int j=0;j<synthetic_range;j++)
+        {
+            double * in = new double[in_size];
+            //std::cout << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" << std::endl;
+            for(int i=index+j,k=0;k<input_learning_range;i-=learning_offset,k++)
+            {
+                in[k] = 100*((prices[i].synthetic)?prices[i].prct_prediction:prices[i].prct_change);
+                if(in[k]<-2)in[k]=-2;
+                if(in[k]> 2)in[k]= 2;
+                in[k]+=2;
+                in[k]/=4;
+                //std::cout << "k=" << k << "\tin=" << in[k] << std::endl;
+            }
+            double * dat = perceptron->model(in_size,out_size,&in[0]);
+            //std::cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$" << std::endl;
+            //std::cout << "j=" << j << "\tdat=" << dat[0] << std::endl;
+            //std::cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$" << std::endl;
+            dat[0] -= 0.5;
+            dat[0] *= 4;
+            dat[0] *= 0.01;
+            prices[index+j*learning_offset+1]. prct_prediction = dat[0];
+            prices[index+j*learning_offset+1].close_prediction = (j==0)
+                                                               ?  prices[index+j*learning_offset].close           *(1+dat[0])
+                                                               :  prices[index+j*learning_offset].close_prediction*(1+dat[0])
+                                                               ;
+            delete [] dat;
+            delete [] in;
+            dat = NULL;
+            in = NULL;
+        }
+      }
+    }
+}
+
 void draw_charts()
 {
   glColor3f(1,1,1);
@@ -3501,6 +3716,7 @@ void draw_charts()
   int volume = 0;
   std::string date = "";
   int price_index = (int)((size-n)+(((double)mouse_x/width)*(n)));
+  reconstruct(prices[stock_index],price_index);
   if(price_index>=0&&price_index<prices[stock_index].size())
   {
     open_price  = prices[stock_index][prices[stock_index].size()-1].open;
@@ -3727,6 +3943,10 @@ void draw_charts()
   for(int i=1,j=0;i<n;i++,j++)
   if(!prices[stock_index][size-i+1].synthetic)
   {
+    glColor3f(1,1,0);
+    // price
+    glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close_prediction-vmin) ,0);
+    glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].close_prediction-vmin) ,0);
     glColor3f(1,1,1);
     // price
     glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close-vmin) ,0);
@@ -3764,6 +3984,13 @@ void draw_charts()
     //  glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].ema_50-b*Bollinger_sigma*prices[stock_index][size-i+1].ems_50-vmin) ,0);
     //  glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].ema_50-b*Bollinger_sigma*prices[stock_index][size-i  ].ems_50-vmin) ,0);
     //}
+  }
+  else
+  {
+    glColor3f(1,1,0);
+    // price
+    glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close_prediction-vmin) ,0);
+    glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].close_prediction-vmin) ,0);
   } 
   glEnd();
 
@@ -3808,15 +4035,7 @@ void draw_charts()
 
 }
 
-long learning_samples = 0;
-int learning_range = 26;
-int learning_offset = 1;
-int learning_num = 3000;
-double *  in_dump = NULL;
-double * out_dump = NULL;
-double * prd_dump = NULL;
-
-long construct_learning_data(int num,int range,int offset,double * in_dump,double * out_dump)
+long construct_learning_data(int num,int offset,double * in_dump,double * out_dump)
 {
   std::cout << "construct learning data" << std::endl;
   long in_off = 0;
@@ -3826,21 +4045,21 @@ long construct_learning_data(int num,int range,int offset,double * in_dump,doubl
   long samples = 0;
   for(int stock_index=0;stock_index<prices.size();stock_index++)
   {
-    if(prices[stock_index].size()>num-offset*range)
+    if(prices[stock_index].size()>num-offset*synthetic_range)
     {
       long size = prices[stock_index].size()-1;
-      for(long ind=range*offset;ind<num;ind++)
+      for(long ind=input_learning_range*offset;ind<num;ind++)
       {
         bool go = true;
         std::vector<price> prev_prcs;
-        for(long k=1;k<range;k++)
+        for(long k=0;k<input_learning_range;k++)
         {
           if(prices[stock_index][size-offset*k-ind].synthetic){go=false;break;}
           prev_prcs.push_back(prices[stock_index][size-offset*k-ind]);
         }
         if(go==false)continue;
         std::vector<price> next_prcs;
-        for(long k=1;k<range;k++)
+        for(long k=1;k<output_learning_range;k++)
         {
           if(prices[stock_index][size+offset*k-ind].synthetic){go=false;break;}
           next_prcs.push_back(prices[stock_index][size+offset*k-ind]);
@@ -3861,15 +4080,13 @@ long construct_learning_data(int num,int range,int offset,double * in_dump,doubl
       }
     }
   }
-  std::cout << in_off << "\t" << in_size << "\t" << robot->get_input_size(range) << std::endl;
-  std::cout << out_off << "\t" << out_size << "\t" << robot->get_output_size(range) << std::endl;
+  std::cout << in_off << "\t" << in_size << "\t" << robot->get_input_size(input_learning_range) << std::endl;
+  std::cout << out_off << "\t" << out_size << "\t" << robot->get_output_size(output_learning_range) << std::endl;
   std::cout << "done constructing learning data" << std::endl;
   return samples;
 }
 
 long learning_selection = 0;
-
-Perceptron<double> * perceptron = NULL;
 
 double * err_stats = NULL;
 bool err_stats_changed = false;
@@ -3879,9 +4096,8 @@ void draw_learning_progress()
 {
   if(in_dump&&out_dump)
   {
-    int range = learning_range;
-    int  in_size = robot-> get_input_size(range);
-    int out_size = robot->get_output_size(range);
+    int  in_size = robot-> get_input_size( input_learning_range);
+    int out_size = robot->get_output_size(output_learning_range);
     // draw input vector
     {
         double dx=0.5f/in_size;
@@ -4003,6 +4219,24 @@ void draw_learning_progress()
         }
         delete [] dat;
         dat = NULL;
+
+        for(int layer=0;layer<perceptron->n_nodes.size();layer++)
+        {
+            double dx=0.5f/perceptron->n_nodes[layer];
+            double val;
+            glBegin(GL_QUADS);
+            for(int x=0;x<perceptron->n_nodes[layer];x++)
+            {
+                val = perceptron->activation_values1[layer][x];
+                glColor3f(val,val,val);
+                glVertex3f(-1+0.2+ x   *dx,-1+.2+(layer+1)*0.02     ,0);
+                glVertex3f(-1+0.2+(x+1)*dx,-1+.2+(layer+1)*0.02     ,0);
+                glVertex3f(-1+0.2+(x+1)*dx,-1+.2+(layer+1)*0.02+0.01,0);
+                glVertex3f(-1+0.2+ x   *dx,-1+.2+(layer+1)*0.02+0.01,0);
+            }
+            glEnd();
+        }
+
       }
     }
 
@@ -4105,11 +4339,11 @@ void init()
 
 void run_perceptron()
 {
-    int  num_inputs = robot-> get_input_size(learning_range);
-    int num_outputs = robot->get_output_size(learning_range);
+    int  num_inputs = robot-> get_input_size(input_learning_range);
+    int num_outputs = robot->get_output_size(output_learning_range);
     std::vector<int> num_hidden;
-    num_hidden.push_back(2*max(num_outputs,num_inputs)+1);
-    num_hidden.push_back(2*max(num_outputs,num_inputs)+1);
+    num_hidden.push_back(2*maxi(num_outputs,num_inputs)+1);
+    num_hidden.push_back(2*maxi(num_outputs,num_inputs)+1);
     int num_elems = robot->num_elems;
     long num_ann_iters = 100000;
     std::vector<long> nodes;
@@ -4130,12 +4364,14 @@ void keyboard(unsigned char key,int x,int y)
 {
   switch(key)
   {
+    case '9':perceptron->dump_to_file("network.ann");break;
+    case '0':perceptron->load_from_file("network.ann");break;
     case '\'':if(perceptron->quasi_newton!=NULL){perceptron->quasi_newton->quasi_newton_update=!perceptron->quasi_newton->quasi_newton_update;}break;
     case ';':perceptron->sigmoid_type = (perceptron->sigmoid_type+1)%2;break;
     case '3':perceptron->epsilon /= 1.1;break;
     case '4':perceptron->epsilon *= 1.1;break;
     case '1':sample_index--;if(sample_index<0)sample_index=0;break;
-    case '2':sample_index++;if(sample_index>=robot->get_output_size(learning_range))sample_index=robot->get_output_size(learning_range)-1;break;
+    case '2':sample_index++;if(sample_index>=robot->get_output_size(output_learning_range))sample_index=robot->get_output_size(output_learning_range)-1;break;
     case 'r':perceptron->alpha *= 1.1;perceptron->quasi_newton->alpha = perceptron->alpha; break;
     case 'f':perceptron->alpha /= 1.1;perceptron->quasi_newton->alpha = perceptron->alpha; break;
     case 'p':
@@ -4347,7 +4583,7 @@ int main(int argc,char ** argv)
 
   bool awesome_macd = true;
 
-  int synthetic_prices = (learning_range-1)*learning_offset;
+  int synthetic_prices = (synthetic_range-1)*learning_offset;
 
   start_date_index = 4000;
   end_date_index = 0;
@@ -4398,11 +4634,11 @@ int main(int argc,char ** argv)
 
   user = new User("Anton Kodochygov",10000,rsymbols);
 
-   in_dump = new double[learning_num*prices.size()*robot-> get_input_size(learning_range)];
-  out_dump = new double[learning_num*prices.size()*robot->get_output_size(learning_range)];
-  prd_dump = new double[learning_num*prices.size()*robot->get_output_size(learning_range)];
+   in_dump = new double[learning_num*prices.size()*robot-> get_input_size(input_learning_range)];
+  out_dump = new double[learning_num*prices.size()*robot->get_output_size(output_learning_range)];
+  prd_dump = new double[learning_num*prices.size()*robot->get_output_size(output_learning_range)];
 
-  learning_samples = construct_learning_data(learning_num,learning_range,learning_offset,in_dump,out_dump);
+  learning_samples = construct_learning_data(learning_num,learning_offset,in_dump,out_dump);
   std::cout << "learning samples: " << learning_samples << std::endl;
 
   glutInit(&argc, argv);

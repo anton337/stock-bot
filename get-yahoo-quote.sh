@@ -24,6 +24,7 @@ if [[ -z $SYMBOL ]]; then
 fi
 echo "Downloading quotes for $SYMBOL"
 
+
 function log () {
   # To remove logging comment echo statement and uncoment the :
   echo $1

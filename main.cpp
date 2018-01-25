@@ -4,6 +4,8 @@
 #include <sstream>
 #include <stdio.h>
 #include <boost/algorithm/string.hpp>
+#include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/thread.hpp>
 #include <fstream>
 #include <algorithm>
 #include <boost/filesystem.hpp>
@@ -11,6 +13,1912 @@
 #include <math.h>
 #include <map>
 #include <set>
+
+int sample_index = 0;
+
+template < typename T >
+T sigmoid1(T x)
+{
+    return 1.0f / (1.0f + exp(-x));
+}
+
+template < typename T >
+T dsigmoid1(T x)
+{
+    return (1.0f - x)*x;
+}
+
+template < typename T >
+T sigmoid2(T x)
+{
+    return log(1+exp(1.00*x));
+}
+
+template < typename T >
+T dsigmoid2(T x)
+{
+    return 1.00/(1+exp(-1.00*x));
+}
+
+template < typename T >
+T sigmoid(T x,int type)
+{
+    switch(type)
+    {
+        case 0:
+            return sigmoid1(x);
+        case 1:
+            return sigmoid2(x);
+    }
+}
+
+template < typename T >
+T dsigmoid(T x,int type)
+{
+    switch(type)
+    {
+        case 0:
+            return dsigmoid1(x);
+        case 1:
+            return dsigmoid2(x);
+    }
+}
+
+template < typename T >
+T max(T a,T b)
+{
+    return (a>b)?a:b;
+}
+
+template < typename T >
+void apply_worker(std::vector<long> const & indices,long size,T * y,T * W,T * x)
+{
+  for(long k=0;k<indices.size();k++)
+  {
+    long i = indices[k];
+    y[i] = 0;
+    for(long j=0;j<size;j++)
+    {
+      y[i] += W[i*size+j]*x[j];
+    }
+  }
+}
+
+template < typename T >
+void outer_product_worker(std::vector<long> const & indices,long size,T * H,T * A,T * B,T fact)
+{
+  for(long k=0;k<indices.size();k++)
+  {
+    long i = indices[k];
+    for(long j=0;j<size;j++)
+    {
+      H[i*size+j] += A[i] * B[j] * fact;
+    }
+  }
+}
+
+template<typename T>
+struct quasi_newton_info
+{
+    quasi_newton_info()
+    {
+        quasi_newton_update = false;
+    }
+
+    long get_size()
+    {
+        long size = 0;
+        for(long layer = 0;layer < n_layers;layer++)
+        {
+            size += n_nodes[layer+1]*n_nodes[layer] + n_nodes[layer+1];
+        }
+        return size;
+    }
+
+    void init_gradient ()
+    {
+        long size = get_size();
+        for(long layer = 0,k = 0;layer < n_layers;layer++)
+        {
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                for(long j=0;j<n_nodes[layer];j++,k++)
+                {
+                    grad_tmp[k] = 0;
+                }
+            }
+            for(long i=0;i<n_nodes[layer+1];i++,k++)
+            {
+                grad_tmp[k] = 0;
+            }
+        }
+    }
+
+    void copy (T * src,T * dst,long size)
+    {
+        for(long k=0;k<size;k++)
+        {
+            dst[k] = src[k];
+        }
+    }
+
+    void copy_avg (T * src,T * dst,T alph,long size)
+    {
+        for(long k=0;k<size;k++)
+        {
+            dst[k] += (src[k]-dst[k])*alph;
+        }
+    }
+
+    bool quasi_newton_update;
+    long n_layers;
+    T *** weights_neuron;
+    T **  weights_bias;
+    std::vector<long> n_nodes;
+    T * grad_tmp;
+    T * grad_1;
+    T * grad_2;
+    T * Y;
+    T * dX;
+    T * B;
+    T * H;
+    T alpha;
+
+    void init_QuasiNewton()
+    {
+        long size = get_size();
+        grad_tmp = new T[size];
+        init_gradient();
+        grad_1 = new T[size];
+        grad_2 = new T[size];
+        copy(grad_tmp,grad_1,size);
+        copy(grad_tmp,grad_2,size);
+        B = new T[size*size];
+        T * B_tmp = init_B();
+        copy(B_tmp,B,size*size);
+        delete [] B_tmp;
+        H = new T[size*size];
+        T * H_tmp = init_H();
+        copy(H_tmp,H,size*size);
+        delete [] H_tmp;
+        dX = new T[size*size];
+        T * dX_tmp = get_dx();
+        copy(dX_tmp,dX,size);
+        delete [] dX_tmp;
+        Y = new T[size*size];
+    }
+
+    T * init_B()
+    {
+        long size = get_size();
+        T * B = new T[size*size];
+        for(long t=0;t<size*size;t++)
+        {
+            B[t] = 0;
+        }
+        for(long layer = 0, k = 0;layer < n_layers;layer++)
+        {
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                for(long j=0;j<n_nodes[layer];j++,k++)
+                {
+                    B[k*size+k] = weights_neuron[layer][i][j];
+                }
+            }
+            for(long i=0;i<n_nodes[layer+1];i++,k++)
+            {
+                B[k*size+k] = weights_bias[layer][i];
+            }
+        }
+        return B;
+    }
+
+    T * init_H()
+    {
+        long size = get_size();
+        T * H = new T[size*size];
+        for(long t=0;t<size*size;t++)
+        {
+            H[t] = 0;
+        }
+        for(long layer = 0, k = 0;layer < n_layers;layer++)
+        {
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                for(long j=0;j<n_nodes[layer];j++,k++)
+                {
+                    H[k*size+k] = -1;
+                }
+            }
+            for(long i=0;i<n_nodes[layer+1];i++,k++)
+            {
+                H[k*size+k] = -1;
+            }
+        }
+        return H;
+    }
+
+    void update_QuasiNewton()
+    {
+        long size = get_size();
+        copy_avg(grad_2,grad_1,0.1,size);
+        copy(grad_tmp,grad_2,size);
+        T * Y_tmp = get_y();
+        copy(Y_tmp,Y,size);
+        delete [] Y_tmp;
+        T * dX_tmp = get_dx();
+        copy(dX_tmp,dX,size);
+        delete [] dX_tmp;
+    }
+
+    T * get_y ()
+    {
+        long size = get_size();
+        T * y = new T[size];
+        //T y_m = 0;
+        for(long k=0;k<size;k++)
+        {
+            y[k] = grad_2[k] - grad_1[k];
+            //y_m = max(y_m,fabs(y[k]));
+        }
+        return y;
+    }
+
+    T * get_dx ()
+    {
+        long size = get_size();
+        T * dx = apply(H,grad_1);
+        for(long k=0;k<size;k++)
+        {
+            dx[k] *= -alpha;
+        }
+        return dx;
+    }
+
+    T * get_outer_product(T * a,T * b)
+    {
+        long size = get_size();
+        long prod_size = size*size;
+        T * prod = new T[prod_size];
+        for(long i=0,k=0;i<size;i++)
+        {
+          for(long j=0;j<size;j++,k++)
+          {
+            prod[k] = a[i]*b[j];
+          }
+        }
+        return prod;
+    }
+
+    T get_inner_product(T * a,T * b)
+    {
+        T ret = 0;
+        long size = get_size();
+        for(long i=0;i<size;i++)
+        {
+            ret += a[i]*b[i];
+        }
+        T eps = 1e-2;
+        if(ret<0)
+        {
+            ret -= eps;
+        }
+        else
+        {
+            ret += eps;
+        }
+        return ret;
+    }
+
+    T * apply(T * W, T * x)
+    {
+        long size = get_size();
+        T * y = new T[size];
+        std::vector<boost::thread * > threads;
+        long num_cpu = boost::thread::hardware_concurrency();
+        std::vector<std::vector<long> > indices(num_cpu);
+        for(long i=0;i<size;i++)
+        {
+          indices[i%num_cpu].push_back(i);
+        }
+        for(long i=0;i<num_cpu;i++)
+        {
+          threads.push_back(new boost::thread(apply_worker<T>,indices[i],size,&y[0],&W[0],&x[0]));
+        }
+        for(long i=0;i<threads.size();i++)
+        {
+          threads[i]->join();
+          delete threads[i];
+        }
+        return y;
+    }
+
+    T * apply_t(T * x, T * W)
+    {
+        long size = get_size();
+        T * y = new T[size];
+        for(long i=0,k=0;i<size;i++)
+        {
+          y[i] = 0;
+          for(long j=0;j<size;j++,k++)
+          {
+            y[i] += W[size*j+i]*x[j];
+          }
+        }
+        return y;
+    }
+
+    T limit(T x,T eps)
+    {
+        if(x>0)
+        {
+            if(x>eps)return eps;
+        }
+        else
+        {
+            if(x<-eps)return -eps;
+        }
+        return x;
+    }
+
+    // SR1
+    void SR1_update()
+    {
+        long size = get_size();
+        T * dx_Hy = apply(H,Y);
+        for(long i=0;i<size;i++)
+        {
+          dx_Hy[i] = dX[i] - dx_Hy[i];
+        }
+        T inner = 1.0 / (get_inner_product(dx_Hy,Y));
+        std::vector<boost::thread * > threads;
+        long num_cpu = boost::thread::hardware_concurrency();
+        std::vector<std::vector<long> > indices(num_cpu);
+        for(long i=0;i<size;i++)
+        {
+          indices[i%num_cpu].push_back(i);
+        }
+        for(long i=0;i<num_cpu;i++)
+        {
+          threads.push_back(new boost::thread(outer_product_worker<T>,indices[i],size,&H[0],&dx_Hy[0],&dx_Hy[0],inner));
+        }
+        for(long i=0;i<threads.size();i++)
+        {
+          threads[i]->join();
+          delete threads[i];
+        }
+        delete [] dx_Hy;
+    }
+
+    // Broyden
+    void Broyden_update()
+    {
+        long size = get_size();
+        T * dx_Hy = apply(H,Y);
+        for(long i=0;i<size;i++)
+        {
+          dx_Hy[i] = dX[i] - dx_Hy[i];
+        }
+        T * xH = apply_t(dX,H);
+        T * outer = get_outer_product(dx_Hy,xH);
+        T inner = 1.0 / (get_inner_product(xH,Y));
+        for(long i=0;i<size*size;i++)
+        {
+          H[i] += outer[i] * inner;
+        }
+        delete [] dx_Hy;
+        delete [] xH;
+        delete [] outer;
+    }
+
+    // DFP
+    void DFP_update()
+    {
+        long size = get_size();
+        T * Hy = apply(H,Y);
+        T * outer_2 = get_outer_product(Hy,Hy);
+        T inner_2 = -1.0 / (get_inner_product(Hy,Y));
+        T * outer_1 = get_outer_product(dX,dX);
+        T inner_1 = 1.0 / (get_inner_product(dX,Y));
+        for(long i=0;i<size*size;i++)
+        {
+          H[i] += outer_1[i] * inner_1 + outer_2[i] * inner_2;
+        }
+        delete [] outer_2;
+        delete [] outer_1;
+        delete [] Hy;
+    }
+
+    T * apply_M(T * A, T * B)
+    {
+        long size = get_size();
+        T * C = new T[size*size];
+        for(long i=0,k=0;i<size;i++)
+        {
+          for(long j=0;j<size;j++,k++)
+          {
+            C[k] = 0;
+            for(long t=0;t<size;t++)
+            {
+              C[k] += A[i*size+t]*B[t*size+j];
+            }
+          }
+        }
+        return C;
+    }
+
+    // BFGS
+    void BFGS_update()
+    {
+        long size = get_size();
+        T inner = 1.0 / (get_inner_product(Y,dX));
+        T * outer_xx = get_outer_product(dX,dX);
+        T * outer_xy = get_outer_product(dX,Y);
+        T * outer_yx = get_outer_product(Y,dX);
+        for(long i=0,k=0;i<size;i++)
+        {
+          for(long j=0;j<size;j++,k++)
+          {
+            if(i==j)
+            {
+              outer_xy[k] = 1-outer_xy[k]*inner;
+              outer_yx[k] = 1-outer_yx[k]*inner;
+            }
+            else
+            {
+              outer_xy[k] = -outer_xy[k]*inner;
+              outer_yx[k] = -outer_yx[k]*inner;
+            }
+            outer_xx[k] = outer_xx[k]*inner;
+          }
+        }
+        T * F = apply_M(outer_xy,H);
+        T * G = apply_M(F,outer_yx);
+        for(long i=0;i<size*size;i++)
+        {
+          H[i] = G[i] + outer_xx[i];
+        }
+        delete [] F;
+        delete [] G;
+        delete [] outer_xx;
+        delete [] outer_xy;
+        delete [] outer_yx;
+    }
+
+};
+
+template<typename T>
+struct training_info
+{
+
+    quasi_newton_info<T> * quasi_newton;
+
+    std::vector<long> n_nodes;
+    T **  activation_values;
+    T **  deltas;
+    long n_variables;
+    long n_labels;
+    long n_layers;
+    long n_elements;
+
+    T *** weights_neuron;
+    T **  weights_bias;
+    T *** partial_weights_neuron;
+    T **  partial_weights_bias;
+
+    T partial_error;
+    T smallest_index;
+
+    T epsilon;
+
+    int type;
+
+    training_info()
+    {
+
+    }
+
+    void init(T _alpha)
+    {
+        type = 0;
+        smallest_index = 0;
+        partial_error = 0;
+        activation_values  = new T*[n_nodes.size()];
+        for(long layer = 0;layer < n_nodes.size();layer++)
+        {
+            activation_values [layer] = new T[n_nodes[layer]];
+        }
+        deltas = new T*[n_nodes.size()];
+        for(long layer = 0;layer < n_nodes.size();layer++)
+        {
+            deltas[layer] = new T[n_nodes[layer]];
+        }
+        partial_weights_neuron = new T**[n_layers];
+        partial_weights_bias = new T*[n_layers];
+        for(long layer = 0;layer < n_layers;layer++)
+        {
+            partial_weights_neuron[layer] = new T*[n_nodes[layer+1]];
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                partial_weights_neuron[layer][i] = new T[n_nodes[layer]];
+                for(long j=0;j<n_nodes[layer];j++)
+                {
+                    partial_weights_neuron[layer][i][j] = 0;
+                }
+            }
+            partial_weights_bias[layer] = new T[n_nodes[layer+1]];
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                partial_weights_bias[layer][i] = 0;
+            }
+        }
+    }
+
+    void destroy()
+    {
+        for(long layer = 0;layer < n_nodes.size();layer++)
+        {
+            delete [] activation_values [layer];
+        }
+        delete [] activation_values;
+        for(long layer = 0;layer < n_nodes.size();layer++)
+        {
+            delete [] deltas [layer];
+        }
+        delete [] deltas;
+        for(long layer = 0;layer < n_layers;layer++)
+        {
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                delete [] partial_weights_neuron[layer][i];
+            }
+            delete [] partial_weights_neuron[layer];
+        }
+        delete [] partial_weights_neuron;
+        for(long layer = 0;layer < n_layers;layer++)
+        {
+            delete [] partial_weights_bias[layer];
+        }
+        delete [] partial_weights_bias;
+    }
+
+    void update_gradient ()
+    {
+        for(long layer = 0,k = 0;layer < n_layers;layer++)
+        {
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                for(long j=0;j<n_nodes[layer];j++,k++)
+                {
+                    quasi_newton->grad_tmp[k] += partial_weights_neuron[layer][i][j] / n_elements;
+                }
+            }
+            for(long i=0;i<n_nodes[layer+1];i++,k++)
+            {
+                quasi_newton->grad_tmp[k] += partial_weights_bias[layer][i] / n_elements;
+            }
+        }
+    }
+
+    void globalUpdate()
+    {
+        if(quasi_newton->quasi_newton_update)
+        {
+            for(long layer = 0,k = 0;layer < n_layers;layer++)
+            {
+                for(long i=0;i<n_nodes[layer+1];i++)
+                {
+                    for(long j=0;j<n_nodes[layer];j++,k++)
+                    {
+                        weights_neuron[layer][i][j] += quasi_newton->dX[k];
+                    }
+                }
+                for(long i=0;i<n_nodes[layer+1];i++,k++)
+                {
+                    weights_bias[layer][i] += quasi_newton->dX[k];
+                }
+            }
+        }
+        else
+        {
+            for(long layer = 0,k = 0;layer < n_layers;layer++)
+            {
+                for(long i=0;i<n_nodes[layer+1];i++)
+                {
+                    for(long j=0;j<n_nodes[layer];j++,k++)
+                    {
+                        weights_neuron[layer][i][j] += epsilon * quasi_newton->grad_tmp[k];
+                    }
+                }
+                for(long i=0;i<n_nodes[layer+1];i++,k++)
+                {
+                    weights_bias[layer][i] += epsilon * quasi_newton->grad_tmp[k];
+                }
+            }
+        }
+    }
+
+};
+
+template<typename T>
+T min(T a,T b)
+{
+    return (a<b)?a:b;
+}
+
+template<typename T>
+void training_worker(training_info<T> * g,std::vector<long> const & vrtx,T * variables,T * labels)
+{
+    
+    for(long n=0;n<vrtx.size();n++)
+    {
+
+        // initialize input activations
+        for(long i=0;i<g->n_nodes[0];i++)
+        {
+            g->activation_values[0][i] = variables[vrtx[n]*g->n_variables+i];
+        }
+        // forward propagation
+        for(long layer = 0; layer < g->n_layers; layer++)
+        {
+            for(long i=0;i<g->n_nodes[layer+1];i++)
+            {
+                T sum = g->weights_bias[layer][i];
+                for(long j=0;j<g->n_nodes[layer];j++)
+                {
+                    sum += g->activation_values[layer][j] * g->weights_neuron[layer][i][j];
+                }
+                g->activation_values[layer+1][i] = sigmoid(sum,g->type);
+                //std::cout << g->activation_values[layer+1][i] << '\t';
+            }
+            //std::cout << std::endl;
+        }
+        long last_layer = g->n_nodes.size()-2;
+        // initialize observed labels
+        T min_partial_error = 1e10;
+        T ind = 0;
+        for(long i=0;i<g->n_nodes[last_layer];i++)
+        {
+            g->deltas[last_layer+1][i] = labels[vrtx[n]*g->n_labels+i] - g->activation_values[last_layer][i];
+            //g->partial_error += fabs(g->deltas[last_layer+1][i]);
+            if(i==sample_index)
+            if(fabs(g->deltas[last_layer+1][i]<min_partial_error))
+            {
+                min_partial_error = fabs(g->deltas[last_layer+1][i]);
+                ind = i;
+            }
+            //std::cout << g->deltas[last_layer+1][i] << '\t';
+        }
+        g->partial_error += min_partial_error;
+        g->smallest_index += ind;
+        //std::cout << std::endl;
+        // back propagation
+        for(long layer = g->n_layers-1; layer >= 0; layer--)
+        {
+            // back propagate deltas
+            for(long i=0;i<g->n_nodes[layer+1];i++)
+            {
+                g->deltas[layer+1][i] = 0;
+                for(long j=0;j<g->n_nodes[layer+2];j++)
+                {
+                    if(layer+1==last_layer)
+                    {
+                        g->deltas[layer+1][i] += dsigmoid(g->activation_values[layer+1][i],g->type)*g->deltas[layer+2][j];
+                    }
+                    else
+                    {
+                        g->deltas[layer+1][i] += dsigmoid(g->activation_values[layer+1][i],g->type)*g->deltas[layer+2][j]*g->weights_neuron[layer+1][j][i];
+                    }
+                }
+                //std::cout << g->deltas[layer+1][i] << '\t';
+            }
+            //std::cout << std::endl;
+            //std::cout << "biases" << std::endl;
+            // biases
+            for(long i=0;i<g->n_nodes[layer+1];i++)
+            {
+                g->partial_weights_bias[layer][i] += g->deltas[layer+1][i];
+                //std::cout << g->partial_weights_bias[layer][i] << '\t';
+            }
+            //std::cout << std::endl;
+            //std::cout << "neuron weights" << std::endl;
+            // neuron weights
+            for(long i=0;i<g->n_nodes[layer+1];i++)
+            {
+                for(long j=0;j<g->n_nodes[layer];j++)
+                {
+                    g->partial_weights_neuron[layer][i][j] += g->activation_values[layer][j] * g->deltas[layer+1][i];
+                    //std::cout << g->partial_weights_neuron[layer][i][j] << '\t';
+                }
+                //std::cout << std::endl;
+            }
+            //std::cout << std::endl;
+        }
+        //char ch;
+        //std::cin >> ch;
+    }
+
+}
+
+std::vector<double> errs;
+
+template<typename T>
+struct Perceptron
+{
+    quasi_newton_info<T> * quasi_newton;
+
+    T ierror;
+    T perror;
+
+    T *** weights_neuron;
+    T **  weights_bias;
+    T **  activation_values;
+    T **  activation_values1;
+    T **  deltas;
+
+    long n_inputs;
+    long n_outputs;
+    long n_layers;
+    std::vector<long> n_nodes;
+
+    T epsilon;
+    T alpha;
+    int sigmoid_type;
+
+    // std::vector<long> nodes;
+    // nodes.push_back(2); // inputs
+    // nodes.push_back(3); // hidden layer
+    // nodes.push_back(1); // output layer
+    // nodes.push_back(1); // outputs
+    Perceptron(std::vector<long> p_nodes)
+    {
+
+        quasi_newton = NULL;
+
+        sigmoid_type = 0;
+        alpha = 0.1;
+
+        ierror = 1e10;
+        perror = 1e10;
+
+        n_nodes = p_nodes;
+        n_inputs = n_nodes[0];
+        n_outputs = n_nodes[n_nodes.size()-1];
+        n_layers = n_nodes.size()-2; // first and last numbers and output and input dimensions, so we have n-2 layers
+
+        weights_neuron = new T**[n_layers];
+        weights_bias = new T*[n_layers];
+        activation_values  = new T*[n_nodes.size()];
+        activation_values1 = new T*[n_nodes.size()];
+        deltas = new T*[n_nodes.size()];
+        
+        for(long layer = 0;layer < n_nodes.size();layer++)
+        {
+            activation_values [layer] = new T[n_nodes[layer]];
+            activation_values1[layer] = new T[n_nodes[layer]];
+            deltas[layer] = new T[n_nodes[layer]];
+        }
+
+        for(long layer = 0;layer < n_layers;layer++)
+        {
+            weights_neuron[layer] = new T*[n_nodes[layer+1]];
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                weights_neuron[layer][i] = new T[n_nodes[layer]];
+                for(long j=0;j<n_nodes[layer];j++)
+                {
+                    weights_neuron[layer][i][j] = -1.0 + 2.0 * ((rand()%10000)/10000.0);
+                }
+            }
+            weights_bias[layer] = new T[n_nodes[layer+1]];
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                weights_bias[layer][i] = -1.0 + 2.0 * ((rand()%10000)/10000.0);
+            }
+        }
+
+        //weights_neuron[0][0][0] = .1;        weights_neuron[0][0][1] = .2;
+        //weights_neuron[0][1][0] = .3;        weights_neuron[0][1][1] = .4;
+        //weights_neuron[0][2][0] = .5;        weights_neuron[0][2][1] = .6;
+
+        //weights_bias[0][0] = .1;
+        //weights_bias[0][1] = .2;
+        //weights_bias[0][2] = .3;
+
+        //weights_neuron[1][0][0] = .6;        weights_neuron[1][0][1] = .7;      weights_neuron[1][0][2] = .8;
+
+        //weights_bias[1][0] = .5;
+
+    }
+
+    T * model(long n_elements,long n_labels,T * variables)
+    {
+        T * labels = new T[n_labels];
+        // initialize input activations
+        for(long i=0;i<n_nodes[0];i++)
+        {
+            activation_values1[0][i] = variables[i];
+        }
+        // forward propagation
+        for(long layer = 0; layer < n_layers; layer++)
+        {
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                T sum = weights_bias[layer][i];
+                for(long j=0;j<n_nodes[layer];j++)
+                {
+                    sum += activation_values1[layer][j] * weights_neuron[layer][i][j];
+                }
+                activation_values1[layer+1][i] = sigmoid(sum,0);// <- zero is important here!!!!
+            }
+        }
+        long last_layer = n_nodes.size()-2;
+        for(long i=0;i<n_labels;i++)
+        {
+            labels[i] = activation_values1[last_layer][i];
+        }
+        return labels;
+    }
+
+    int get_sigmoid()
+    {
+        return sigmoid_type;
+    }
+
+    void train(int p_sigmoid_type,T p_epsilon,long n_iterations,long n_elements,long n_variables,T * variables,long n_labels, T * labels)
+    {
+        sigmoid_type = p_sigmoid_type;
+        epsilon = p_epsilon;
+        if(n_variables != n_nodes[0]){std::cout << "error 789437248932748293" << std::endl;exit(0);}
+        quasi_newton = new quasi_newton_info<T>();
+        quasi_newton->alpha = alpha;
+        quasi_newton->n_nodes = n_nodes;
+        quasi_newton->n_layers = n_layers;
+        quasi_newton->weights_neuron = weights_neuron;
+        quasi_newton->weights_bias = weights_bias;
+        quasi_newton->init_QuasiNewton();
+        quasi_newton->quasi_newton_update = false;
+        ierror = 1e10;
+        bool init = true;
+        perror = 1e10;
+        for(long iter = 0; iter < n_iterations; iter++)
+        {
+            T error = 0;
+            T index = 0;
+
+            //////////////////////////////////////////////////////////////////////////////////
+            //                                                                              //
+            //          Multi-threaded block                                                //
+            //                                                                              //
+            //////////////////////////////////////////////////////////////////////////////////
+            std::vector<boost::thread*> threads;
+            std::vector<std::vector<long> > vrtx(boost::thread::hardware_concurrency());
+            std::vector<training_info<T>*> g;
+            for(long i=0;i<n_elements;i++)
+            {
+              vrtx[i%vrtx.size()].push_back(i);
+            }
+            for(long i=0;i<vrtx.size();i++)
+            {
+              g.push_back(new training_info<T>());
+            }
+            quasi_newton->init_gradient();
+            for(long thread=0;thread<vrtx.size();thread++)
+            {
+              g[thread]->quasi_newton = quasi_newton;
+              g[thread]->n_nodes = n_nodes;
+              g[thread]->n_elements = n_elements;
+              g[thread]->n_variables = n_variables;
+              g[thread]->n_labels = n_labels;
+              g[thread]->n_layers = n_layers;
+              g[thread]->weights_neuron = weights_neuron;
+              g[thread]->weights_bias = weights_bias;
+              g[thread]->epsilon = epsilon;
+              g[thread]->type = get_sigmoid();
+
+              g[thread]->init(alpha);
+              threads.push_back(new boost::thread(training_worker<T>,g[thread],vrtx[thread],variables,labels));
+            }
+            for(long thread=0;thread<vrtx.size();thread++)
+            {
+              threads[thread]->join();
+              g[thread]->update_gradient();
+              delete threads[thread];
+            }
+            quasi_newton->update_QuasiNewton();
+            quasi_newton->SR1_update();
+            for(long thread=0;thread<vrtx.size();thread++)
+            {
+              g[thread]->globalUpdate();
+              error += g[thread]->partial_error;
+              index += g[thread]->smallest_index;
+              g[thread]->destroy();
+              delete g[thread];
+            }
+            threads.clear();
+            vrtx.clear();
+            g.clear();
+
+            static int cnt1 = 0;
+            if(cnt1%1==0)
+            std::cout << iter << "\tquasi_newton_update=" << quasi_newton->quasi_newton_update << "\ttype=" << sigmoid_type << "\tepsilon=" << epsilon << "\talpha=" << alpha << '\t' << "error=" << error << "\tdiff=" << (error-perror) << "\t\%error=" << 100*error/n_elements << "\tindex=" << index/n_elements << std::endl;
+            cnt1++;
+            perror = error;
+            errs.push_back(error/n_elements);
+            if(init)
+            {
+                ierror = error;
+                init = false;
+            }
+
+            //char ch;
+            //std::cin >> ch;
+
+        }
+    }
+
+};
+
+
+void clear() {
+  // CSI[2J clears screen, CSI[H moves the cursor to top-left corner
+  std::cout << "\x1B[2J\x1B[H";
+}
+
+double norm(double * dat,long size)
+{
+  double ret = 0;
+  for(long i=0;i<size;i++)
+  {
+    ret += dat[i]*dat[i];
+  }
+  return sqrt(ret);
+}
+
+void zero(double * dat,long size)
+{
+  for(long i=0;i<size;i++)
+  {
+    dat[i] = 0;
+  }
+}
+
+void constant(double * dat,double val,long size)
+{
+  for(long i=0;i<size;i++)
+  {
+    dat[i] = (-1+2*((rand()%10000)/10000.0f))*val;
+  }
+}
+
+void add(double * A, double * dA, double epsilon, long size)
+{
+  for(long i=0;i<size;i++)
+  {
+    A[i] += epsilon * dA[i];
+  }
+}
+
+struct gradient_info
+{
+  long n;
+  long v;
+  long h;
+  double * vis0;
+  double * hid0;
+  double * vis;
+  double * hid;
+  double * dW;
+  double * dc;
+  double * db;
+  double partial_err;
+  double * partial_dW;
+  double * partial_dc;
+  double * partial_db;
+  void init()
+  {
+    partial_err = 0;
+    partial_dW = new double[h*v];
+    for(int i=0;i<h*v;i++)partial_dW[i]=0;
+    partial_dc = new double[h];
+    for(int i=0;i<h;i++)partial_dc[i]=0;
+    partial_db = new double[v];
+    for(int i=0;i<v;i++)partial_db[i]=0;
+  }
+  void destroy()
+  {
+    delete [] partial_dW;
+    delete [] partial_dc;
+    delete [] partial_db;
+  }
+  void globalUpdate()
+  {
+    for(int i=0;i<h*v;i++)
+        dW[i] += partial_dW[i];
+    for(int i=0;i<h;i++)
+        dc[i] += partial_dc[i];
+    for(int i=0;i<v;i++)
+        db[i] += partial_db[i];
+  }
+};
+
+void gradient_worker(gradient_info * g,std::vector<long> const & vrtx)
+{
+  double factor = 1.0f / g->n;
+  double factorv= 1.0f / (g->v*g->v);
+  for(long t=0;t<vrtx.size();t++)
+  {
+    long k = vrtx[t];
+    for(long i=0;i<g->v;i++)
+    {
+      for(long j=0;j<g->h;j++)
+      {
+        g->partial_dW[i*g->h+j] -= factor * (g->vis0[k*g->v+i]*g->hid0[k*g->h+j] - g->vis[k*g->v+i]*g->hid[k*g->h+j]);
+      }
+    }
+
+    for(long j=0;j<g->h;j++)
+    {
+      g->partial_dc[j] -= factor * (g->hid0[k*g->h+j]*g->hid0[k*g->h+j] - g->hid[k*g->h+j]*g->hid[k*g->h+j]);
+    }
+
+    for(long i=0;i<g->v;i++)
+    {
+      g->partial_db[i] -= factor * (g->vis0[k*g->v+i]*g->vis0[k*g->v+i] - g->vis[k*g->v+i]*g->vis[k*g->v+i]);
+    }
+
+    for(long i=0;i<g->v;i++)
+    {
+      g->partial_err += factorv * (g->vis0[k*g->v+i]-g->vis[k*g->v+i])*(g->vis0[k*g->v+i]-g->vis[k*g->v+i]);
+    }
+  }
+}
+
+void vis2hid_worker(const double * X,double * H,long h,long v,double * c,double * W,std::vector<long> const & vrtx)
+{
+  for(long t=0;t<vrtx.size();t++)
+  {
+    long k = vrtx[t];
+    for(long j=0;j<h;j++)
+    {
+      H[k*h+j] = c[j]; 
+      for(long i=0;i<v;i++)
+      {
+        H[k*h+j] += W[i*h+j] * X[k*v+i];
+      }
+      H[k*h+j] = 1.0f/(1.0f + exp(-H[k*h+j]));
+    }
+  }
+}
+
+void hid2vis_worker(const double * H,double * V,long h,long v,double * b,double * W,std::vector<long> const & vrtx)
+{
+  for(long t=0;t<vrtx.size();t++)
+  {
+    long k = vrtx[t];
+    for(long i=0;i<v;i++)
+    {
+      V[k*v+i] = b[i]; 
+      for(long j=0;j<h;j++)
+      {
+        V[k*v+i] += W[i*h+j] * H[k*h+j];
+      }
+      V[k*v+i] = 1.0f/(1.0f + exp(-V[k*v+i]));
+    }
+  }
+}
+
+struct RBM
+{
+  long h; // number hidden elements
+  long v; // number visible elements
+  long n; // number of samples
+  double * c; // bias term for hidden state, R^h
+  double * b; // bias term for visible state, R^v
+  double * W; // weight matrix R^h*v
+  double * X; // input data, binary [0,1], v*n
+
+  double * vis0;
+  double * hid0;
+  double * vis;
+  double * hid;
+  double * dW;
+  double * dc;
+  double * db;
+
+  RBM(long _v,long _h,double * _W,double * _b,double * _c,long _n,double * _X)
+  {
+    //for(long k=0;k<100;k++)
+    //  std::cout << _X[k] << "\t";
+    //std::cout << "\n";
+    X = _X;
+    h = _h;
+    v = _v;
+    n = _n;
+    c = _c;
+    b = _b;
+    W = _W;
+
+    vis0 = NULL;
+    hid0 = NULL;
+    vis = NULL;
+    hid = NULL;
+    dW = NULL;
+    dc = NULL;
+    db = NULL;
+  }
+  RBM(long _v,long _h,long _n,double* _X)
+  {
+    //for(long k=0;k<100;k++)
+    //  std::cout << _X[k] << "\t";
+    //std::cout << "\n";
+    X = _X;
+    h = _h;
+    v = _v;
+    n = _n;
+    c = new double[h];
+    b = new double[v];
+    W = new double[h*v];
+    constant(c,0.5f,h);
+    constant(b,0.5f,v);
+    constant(W,0.5f,v*h);
+
+    vis0 = NULL;
+    hid0 = NULL;
+    vis = NULL;
+    hid = NULL;
+    dW = NULL;
+    dc = NULL;
+    db = NULL;
+  }
+
+  void init(int offset)
+  {
+    boost::posix_time::ptime time_start(boost::posix_time::microsec_clock::local_time());
+    if(vis0==NULL)vis0 = new double[n*v];
+    if(hid0==NULL)hid0 = new double[n*h];
+    if(vis==NULL)vis = new double[n*v];
+    if(hid==NULL)hid = new double[n*h];
+    if(dW==NULL)dW = new double[h*v];
+    if(dc==NULL)dc = new double[h];
+    if(db==NULL)db = new double[v];
+
+    //std::cout << "n*v=" << n*v << std::endl;
+    //std::cout << "offset=" << offset << std::endl;
+    for(long i=0,size=n*v;i<size;i++)
+    {
+      vis0[i] = X[i+offset];
+    }
+
+    vis2hid(vis0,hid0);
+    boost::posix_time::ptime time_end(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration(time_end - time_start);
+    //std::cout << "init timing:" << duration << '\n';
+  }
+
+  void cd(long nGS,double epsilon,int offset=0,bool bottleneck=false)
+  {
+    boost::posix_time::ptime time_0(boost::posix_time::microsec_clock::local_time());
+    //std::cout << "cd" << std::endl;
+
+    // CD Contrastive divergence (Hlongon's CD(k))
+    //   [dW, db, dc, act] = cd(self, X) returns the gradients of
+    //   the weihgts, visible and hidden biases using Hlongon's
+    //   approximated CD. The sum of the average hidden units
+    //   activity is returned in act as well.
+
+    for(long i=0;i<n*h;i++)
+    {
+      hid[i] = hid0[i];
+    }
+    boost::posix_time::ptime time_1(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration10(time_1 - time_0);
+    //std::cout << "cd timing 1:" << duration10 << '\n';
+
+    for (long iter = 1;iter<=nGS;iter++)
+    {
+      //std::cout << "iter=" << iter << std::endl;
+      // sampling
+      hid2vis(hid,vis);
+      vis2hid(vis,hid);
+
+// Preview stuff
+#if 0
+      long off = dat_offset%(n);
+      long offv = off*v;
+      long offh = off*h;
+      long off_preview = off*(3*WIN*WIN+10);
+      for(long x=0,k=0;x<WIN;x++)
+      {
+        for(long y=0;y<WIN;y++,k++)
+        {
+          vis_preview[k] = vis[offv+k];
+          vis_previewG[k] = vis[offv+k+WIN*WIN];
+          vis_previewB[k] = vis[offv+k+2*WIN*WIN];
+        }
+      }
+      for(long x=0,k=0;x<WIN;x++)
+      {
+        for(long y=0;y<WIN;y++,k++)
+        {
+          vis1_preview[k] = orig_arr[offset+off_preview+k];
+          vis1_previewG[k] = orig_arr[offset+off_preview+k+WIN*WIN];
+          vis1_previewB[k] = orig_arr[offset+off_preview+k+2*WIN*WIN];
+        }
+      }
+      for(long x=0,k=0;x<WIN;x++)
+      {
+        for(long y=0;y<WIN;y++,k++)
+        {
+          vis0_preview[k] = vis0[offv+k];
+          vis0_previewG[k] = vis0[offv+k+WIN*WIN];
+          vis0_previewB[k] = vis0[offv+k+2*WIN*WIN];
+        }
+      }
+#endif
+
+    }
+    boost::posix_time::ptime time_2(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration21(time_2 - time_1);
+    //std::cout << "cd timing 2:" << duration21 << '\n';
+  
+    zero(dW,v*h);
+    zero(dc,h);
+    zero(db,v);
+    boost::posix_time::ptime time_3(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration32(time_3 - time_2);
+    //std::cout << "cd timing 3:" << duration32 << '\n';
+    double * err = new double(0);
+    gradient_update(n,vis0,hid0,vis,hid,dW,dc,db,err);
+    boost::posix_time::ptime time_4(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration43(time_4 - time_3);
+    //std::cout << "cd timing 4:" << duration43 << '\n';
+    *err = sqrt(*err);
+    for(int t=2;t<3&&t<errs.size();t++)
+      *err += (errs[errs.size()+1-t]-*err)/t;
+    errs.push_back(*err);
+    boost::posix_time::ptime time_5(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration54(time_5 - time_4);
+    //std::cout << "cd timing 5:" << duration54 << '\n';
+    //std::cout << "epsilon = " << epsilon << std::endl;
+    add(W,dW,-epsilon,v*h);
+    add(c,dc,-epsilon,h);
+    add(b,db,-epsilon,v);
+
+    //std::cout << "dW norm = " << norm(dW,v*h) << std::endl;
+    //std::cout << "dc norm = " << norm(dc,h) << std::endl;
+    //std::cout << "db norm = " << norm(db,v) << std::endl;
+    //std::cout << "W norm = " << norm(W,v*h) << std::endl;
+    //std::cout << "c norm = " << norm(c,h) << std::endl;
+    //std::cout << "b norm = " << norm(b,v) << std::endl;
+    //std::cout << "err = " << *err << std::endl;
+    delete err;
+
+    boost::posix_time::ptime time_6(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration65(time_6 - time_5);
+    //std::cout << "cd timing 6:" << duration65 << '\n';
+    //char ch;
+    //std::cin >> ch;
+  }
+
+  void sigmoid(double * p,double * X,long n)
+  {
+    for(long i=0;i<n;i++)
+    {
+      p[i] = 1.0f/(1.0f + exp(-X[i]));
+    }
+  }
+
+  void vis2hid_simple(const double * X,double * H)
+  {
+    {
+      for(long j=0;j<h;j++)
+      {
+        H[j] = c[j]; 
+        for(long i=0;i<v;i++)
+        {
+          H[j] += W[i*h+j] * X[i];
+        }
+        H[j] = 1.0f/(1.0f + exp(-H[j]));
+      }
+    }
+  }
+
+  void hid2vis_simple(const double * H,double * V)
+  {
+    {
+      for(long i=0;i<v;i++)
+      {
+        V[i] = b[i]; 
+        for(long j=0;j<h;j++)
+        {
+          V[i] += W[i*h+j] * H[j];
+        }
+        V[i] = 1.0f/(1.0f + exp(-V[i]));
+      }
+    }
+  }
+
+  void vis2hid(const double * X,double * H)
+  {
+    std::vector<boost::thread*> threads;
+    std::vector<std::vector<long> > vrtx(boost::thread::hardware_concurrency());
+    for(long i=0;i<n;i++)
+    {
+      vrtx[i%vrtx.size()].push_back(i);
+    }
+    for(long thread=0;thread<vrtx.size();thread++)
+    {
+      threads.push_back(new boost::thread(vis2hid_worker,X,H,h,v,c,W,vrtx[thread]));
+    }
+    for(long thread=0;thread<vrtx.size();thread++)
+    {
+      threads[thread]->join();
+      delete threads[thread];
+    }
+    threads.clear();
+    vrtx.clear();
+  }
+
+  void gradient_update(long n,double * vis0,double * hid0,double * vis,double * hid,double * dW,double * dc,double * db,double * err)
+  {
+    boost::posix_time::ptime time_0(boost::posix_time::microsec_clock::local_time());
+
+    std::vector<boost::thread*> threads;
+    std::vector<std::vector<long> > vrtx(boost::thread::hardware_concurrency());
+    std::vector<gradient_info*> g;
+
+    boost::posix_time::ptime time_1(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration10(time_1 - time_0);
+    //std::cout << "gradient update timing 1:" << duration10 << '\n';
+
+    for(long i=0;i<n;i++)
+    {
+      vrtx[i%vrtx.size()].push_back(i);
+    }
+    boost::posix_time::ptime time_2(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration21(time_2 - time_1);
+    //std::cout << "gradient update timing 2:" << duration21 << '\n';
+    for(long i=0;i<vrtx.size();i++)
+    {
+      g.push_back(new gradient_info());
+    }
+    boost::posix_time::ptime time_3(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration32(time_3 - time_2);
+    //std::cout << "gradient update timing 3:" << duration32 << '\n';
+    for(long thread=0;thread<vrtx.size();thread++)
+    {
+      g[thread]->n = n;
+      g[thread]->v = v;
+      g[thread]->h = h;
+      g[thread]->vis0 = vis0;
+      g[thread]->hid0 = hid0;
+      g[thread]->vis = vis;
+      g[thread]->hid = hid;
+      g[thread]->dW = dW;
+      g[thread]->dc = dc;
+      g[thread]->db = db;
+      g[thread]->init();
+      threads.push_back(new boost::thread(gradient_worker,g[thread],vrtx[thread]));
+    }
+    boost::posix_time::ptime time_4(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration43(time_4 - time_3);
+    //std::cout << "gradient update timing 4:" << duration43 << '\n';
+    for(long thread=0;thread<vrtx.size();thread++)
+    {
+      threads[thread]->join();
+      delete threads[thread];
+      g[thread]->globalUpdate();
+      *err += g[thread]->partial_err;
+      g[thread]->destroy();
+      delete g[thread];
+    }
+    boost::posix_time::ptime time_5(boost::posix_time::microsec_clock::local_time());
+    boost::posix_time::time_duration duration54(time_5 - time_4);
+    //std::cout << "gradient update timing 5:" << duration54 << '\n';
+    threads.clear();
+    vrtx.clear();
+    g.clear();
+  }
+  
+  void hid2vis(const double * H,double * V)
+  {
+    std::vector<boost::thread*> threads;
+    std::vector<std::vector<long> > vrtx(boost::thread::hardware_concurrency());
+    for(long i=0;i<n;i++)
+    {
+      vrtx[i%vrtx.size()].push_back(i);
+    }
+    for(long thread=0;thread<vrtx.size();thread++)
+    {
+      threads.push_back(new boost::thread(hid2vis_worker,H,V,h,v,b,W,vrtx[thread]));
+    }
+    for(long thread=0;thread<vrtx.size();thread++)
+    {
+      threads[thread]->join();
+      delete threads[thread];
+    }
+    threads.clear();
+    vrtx.clear();
+  }
+
+};
+
+struct DataUnit
+{
+  DataUnit *   hidden;
+  DataUnit *  visible;
+  DataUnit * visible0;
+  long h,v;
+  double * W;
+  double * b;
+  double * c;
+  RBM * rbm;
+  long num_iters;
+  long batch_iter;
+  DataUnit(long _v,long _h,long _num_iters = 100,long _batch_iter = 1)
+  {
+    num_iters = _num_iters;
+    batch_iter = _batch_iter;
+    v = _v;
+    h = _h;
+    W = new double[v*h];
+    b = new double[v];
+    c = new double[h];
+    constant(c,0.5f,h);
+    constant(b,0.5f,v);
+    constant(W,0.5f,v*h);
+      hidden = NULL;
+     visible = NULL;
+    visible0 = NULL;
+  }
+
+  void train(double * dat, long n, long total_n,int n_cd,double epsilon,long n_var)
+  {
+    // RBM(long _v,long _h,double * _W,double * _b,double * _c,long _n,double * _X)
+    rbm = new RBM(v,h,W,b,c,n,dat);
+    for(long i=0;i<num_iters;i++)
+    {
+      //std::cout << "DataUnit::train i=" << i << std::endl;
+      long offset = (rand()%(total_n-n));
+      for(long k=0;k<batch_iter;k++)
+      {
+        rbm->init(offset);
+        //std::cout << "prog:" << 100*(double)k/batch_iter << "%" << std::endl;
+        rbm->cd(n_cd,epsilon,offset*n_var);
+      }
+    }
+    //char ch;
+    //std::cin >> ch;
+  }
+
+  void transform(double* X,double* Y)
+  {
+    rbm->vis2hid(X,Y);
+  }
+
+  void initialize_weights(DataUnit* d)
+  {
+    if(v==d->h&&h==d->v)
+    {
+      for(int i=0;i<v;i++)
+      {
+        for(int j=0;j<h;j++)
+        {
+          W[i*h+j] = d->W[j*d->h+i];
+        }
+      }
+    }
+  }
+
+  void initialize_weights(DataUnit* d1,DataUnit* d2)
+  {
+    if(v==d1->h+d2->h&&d1->v==h&&d2->v==h)
+    {
+      std::cout << "initialize bottleneck" << std::endl;
+      //char ch;
+      //std::cin >> ch;
+      int j=0;
+      for(int k=0;j<d1->h;j++,k++)
+      {
+        for(int i=0;i<d1->v;i++)
+        {
+          W[i*h+j] = d1->W[k*d1->h+i];
+        }
+      }
+      for(int k=0;j<d1->h+d2->h;j++,k++)
+      {
+        for(int i=0;i<d2->v;i++)
+        {
+          W[i*h+j] = d2->W[k*d2->h+i];
+        }
+      }
+    }
+  }
+
+};
+
+// Multi Layer RBM
+//
+//  Auto-encoder
+//
+//          [***]
+//         /     \
+//     [*****] [*****]
+//       /         \
+// [********]   [********]
+//   inputs      outputs
+//
+struct mRBM
+{
+  long in_samp;
+  long out_samp;
+  bool model_ready;
+  std::vector<DataUnit*>  input_branch;
+  std::vector<DataUnit*> output_branch;
+  DataUnit* bottle_neck;
+  void addInputDatUnit(long v,long h)
+  {
+    DataUnit * unit = new DataUnit(v,h);
+    input_branch.push_back(unit);
+  }
+  void addOutputDatUnit(long v,long h)
+  {
+    output_branch.push_back(new DataUnit(v,h));
+  }
+  void addBottleNeckDatUnit(long v,long h)
+  {
+    bottle_neck = new DataUnit(v,h);
+  }
+  void construct(std::vector<long> input_num,std::vector<long> output_num,long bottle_neck_num)
+  {
+    for(long i=0;i+1<input_num.size();i++)
+    {
+      input_branch.push_back(new DataUnit(input_num[i],input_num[i+1]));
+    }
+    for(long i=0;i+1<output_num.size();i++)
+    {
+      output_branch.push_back(new DataUnit(output_num[i],output_num[i+1]));
+    }
+    bottle_neck = new DataUnit(input_num[input_num.size()-1]+output_num[output_num.size()-1],bottle_neck_num);
+  }
+  mRBM(long _in_samp,long _out_samp)
+  {
+    in_samp = _in_samp;
+    out_samp = _out_samp;
+    model_ready = false;
+    bottle_neck = NULL;
+  }
+  void copy(double * X,double * Y,long num)
+  {
+    for(long i=0;i<num;i++)
+    {
+      Y[i] = X[i];
+    }
+  }
+  void model_simple(long sample,double * in,double * out)
+  {
+    double * X = NULL;
+    double * Y = NULL;
+    X = new double[input_branch[0]->v];
+    for(long i=0;i<input_branch[0]->v;i++)
+    {
+      X[i] = in[sample*input_branch[0]->v+i];
+    }
+    for(long i=0;i<input_branch.size();i++)
+    {
+      Y = new double[input_branch[i]->h];
+      input_branch[i]->rbm->vis2hid_simple(X,Y);
+      delete [] X;
+      X = NULL;
+      X = new double[input_branch[i]->h];
+      copy(Y,X,input_branch[i]->h);
+      delete [] Y;
+      Y = NULL;
+    }
+    double * X_bottleneck = NULL;
+    X_bottleneck = new double[bottle_neck->h];
+    for(long i=0;i<input_branch[input_branch.size()-1]->h;i++)
+    {
+      X_bottleneck[i] = X[i];
+    }
+    for(long i=input_branch[input_branch.size()-1]->h;i<bottle_neck->h;i++)
+    {
+      X_bottleneck[i] = 0;
+    }
+    delete [] X;
+    X = NULL;
+    {
+      double * Y_bottleneck = NULL;
+      Y_bottleneck = new double[bottle_neck->h];
+      bottle_neck->rbm->vis2hid_simple(X_bottleneck,Y_bottleneck);
+      bottle_neck->rbm->hid2vis_simple(Y_bottleneck,X_bottleneck);
+      delete [] Y_bottleneck;
+      Y_bottleneck = NULL;
+      Y = new double[out_samp];
+      for(long i=input_branch[input_branch.size()-1]->h,k=0;i<bottle_neck->h;i++,k++)
+      {
+        Y[k] = X_bottleneck[i];
+      }
+      delete [] X_bottleneck;
+      X_bottleneck = NULL;
+    }
+    for(long j=0;j<out_samp;j++)
+    {
+      out[sample*out_samp+j] = Y[j];//(Y[j]+1e-5)/(Y_max+1e-5);
+    }
+    for(long i=output_branch.size()-1;i>=0;i--)
+    {
+      X = new double[output_branch[i]->v];
+      output_branch[i]->rbm->hid2vis_simple(Y,X);
+      delete [] Y;
+      Y = NULL;
+      Y = new double[output_branch[i]->v];
+      copy(X,Y,output_branch[i]->v);
+      delete [] X;
+      X = NULL;
+      for(long j=0;j<output_branch[i]->v;j++)
+      {
+        out[sample*output_branch[i]->v+j] = Y[j];
+      }
+    }
+    delete [] Y;
+    Y = NULL;
+  }
+  double ** model(long sample,double * in)
+  {
+    double ** out = new double*[20];
+    for(int i=0;i<20;i++)out[i]=new double[bottle_neck->v];
+    for(int l=0;l<20;l++)
+    for(int i=0;i<bottle_neck->v;i++)
+    out[l][i]=0;
+    //std::cout << "model:\t\t";
+    //for(int i=0;i<input_branch[0]->v;i++)
+    //std::cout << in[sample*input_branch[0]->v+i] << '\t';
+    //std::cout << '\n';
+    long layer = 0;
+    double * X = NULL;
+    double * Y = NULL;
+    X = new double[input_branch[0]->v];
+    for(long i=0;i<input_branch[0]->v;i++)
+    {
+      X[i] = in[sample*input_branch[0]->v+i];
+    }
+    for(long i=0;i<input_branch[0]->v;i++)
+    {
+      out[layer][i] = X[i];
+    }
+    //std::cout << "out:\t\t";
+    //for(int i=0;i<input_branch[0]->v;i++)
+    //std::cout << out[layer][i] << '\t';
+    //std::cout << '\n';
+    layer++;
+    //std::cout << "input_branch size:" << input_branch.size() << std::endl;
+    for(long i=0;i<input_branch.size();i++)
+    {
+      Y = new double[input_branch[i]->h];
+      input_branch[i]->rbm->vis2hid_simple(X,Y);
+      delete [] X;
+      X = NULL;
+      X = new double[input_branch[i]->h];
+      copy(Y,X,input_branch[i]->h);
+      delete [] Y;
+      Y = NULL;
+      for(long j=0;j<input_branch[i]->h;j++)
+      {
+        out[layer][j] = X[j];
+      }
+      layer++;
+    }
+    double * X_bottleneck = NULL;
+    X_bottleneck = new double[bottle_neck->h];
+    for(long i=0;i<input_branch[input_branch.size()-1]->h;i++)
+    {
+      X_bottleneck[i] = X[i];
+    }
+    for(long i=input_branch[input_branch.size()-1]->h;i<bottle_neck->h;i++)
+    {
+      X_bottleneck[i] = 0;
+    }
+    delete [] X;
+    X = NULL;
+    {
+      double * Y_bottleneck = NULL;
+      Y_bottleneck = new double[bottle_neck->h];
+      bottle_neck->rbm->vis2hid_simple(X_bottleneck,Y_bottleneck);
+      for(long j=0;j<bottle_neck->v;j++)
+      {
+        out[layer][j] = X_bottleneck[j];
+      }
+      layer++;
+      for(long j=0;j<bottle_neck->v;j++)
+      {
+        out[layer][j] = Y_bottleneck[j];
+      }
+      layer++;
+      bottle_neck->rbm->hid2vis_simple(Y_bottleneck,X_bottleneck);
+      for(long j=0;j<bottle_neck->v;j++)
+      {
+        out[layer][j] = X_bottleneck[j];
+      }
+      layer++;
+      delete [] Y_bottleneck;
+      Y_bottleneck = NULL;
+      Y = new double[out_samp];
+      for(long i=input_branch[input_branch.size()-1]->h,k=0;i<bottle_neck->h;i++,k++)
+      {
+        Y[k] = X_bottleneck[i];
+      }
+      delete [] X_bottleneck;
+      X_bottleneck = NULL;
+    }
+    //double Y_max = 0;
+    //for(long j=0;j<bottle_neck->v-input_branch[input_branch.size()-1]->v;j++)
+    //{
+    //  if(Y[j]>Y_max)Y_max = Y[j];
+    //}
+    for(long j=0;j<out_samp;j++)
+    {
+      out[layer][j] = Y[j];//(Y[j]+1e-5)/(Y_max+1e-5);
+    }
+    layer++;
+    for(long i=output_branch.size()-1;i>=0;i--)
+    {
+      X = new double[output_branch[i]->v];
+      output_branch[i]->rbm->hid2vis_simple(Y,X);
+      delete [] Y;
+      Y = NULL;
+      Y = new double[output_branch[i]->v];
+      copy(X,Y,output_branch[i]->v);
+      delete [] X;
+      X = NULL;
+      for(long j=0;j<output_branch[i]->v;j++)
+      {
+        out[layer][j] = Y[j];
+      }
+      layer++;
+    }
+    //for(long i=0;i<output_branch[0]->v;i++)
+    //{
+    //  out[layer][i] = Y[i];
+    //}
+    delete [] Y;
+    Y = NULL;
+    return out;
+  }
+  void train(long in_num,long out_num,long n_samp,long total_n,long n_cd,double epsilon,double * in,double * out)
+  {
+    double * X = NULL;
+    double * Y = NULL;
+    double * IN = NULL;
+    double * OUT = NULL;
+    X = new double[in_num*n_samp];
+    IN = new double[in_num*n_samp];
+    for(long i=0;i<in_num*n_samp;i++)
+    {
+      X[i] = in[i];
+    }
+    for(long i=0;i<input_branch.size();i++)
+    {
+      if(i>0)input_branch[i]->initialize_weights(input_branch[i-1]); // initialize weights to transpose of previous layer weights M_i -> W = M_{i-1} -> W ^ T
+      input_branch[i]->train(X,n_samp,total_n,n_cd,epsilon,input_branch[i]->h);
+      Y = new double[input_branch[i]->h*n_samp];
+      input_branch[i]->transform(X,Y);
+      delete [] X;
+      X = NULL;
+      //std::cout << "X init:" << in_num*n_samp << "    " << "X fin:" << input_branch[i]->h*n_samp << std::endl;
+      X = new double[input_branch[i]->h*n_samp];
+      copy(Y,X,input_branch[i]->h*n_samp);
+      copy(Y,IN,input_branch[i]->h*n_samp);
+      delete [] Y;
+      Y = NULL;
+    }
+    delete [] X;
+    X = NULL;
+    X = new double[out_num*n_samp];
+    OUT = new double[in_num*n_samp];
+    for(long i=0;i<out_num*n_samp;i++)
+    {
+      X[i] = out[i];
+      OUT[i] = out[i];
+    }
+    for(long i=0;i<output_branch.size();i++)
+    {
+      if(i>0)output_branch[i]->initialize_weights(output_branch[i-1]); // initialize weights to transpose of previous layer weights M_i -> W = M_{i-1} -> W ^ T
+      output_branch[i]->train(X,n_samp,total_n,n_cd,epsilon,input_branch[i]->h);
+      Y = new double[output_branch[i]->h*n_samp];
+      output_branch[i]->transform(X,Y);
+      delete [] X;
+      X = NULL;
+      X = new double[output_branch[i]->h*n_samp];
+      copy(Y,X,output_branch[i]->h*n_samp);
+      copy(Y,OUT,output_branch[i]->h*n_samp);
+      delete [] Y;
+      Y = NULL;
+    }
+    delete [] X;
+    X = NULL;
+    if(bottle_neck!=NULL)
+    {
+      X = new double[bottle_neck->h*n_samp];
+      for(long s=0;s<n_samp;s++)
+      {
+        long i=0;
+        for(long k=0;i<in_num&&k<in_num;i++,k++)
+        {
+          X[s*(in_num+out_num)+i] = IN[s*in_num+k];
+        }
+        for(long k=0;i<in_num+out_num&&k<out_num;i++,k++)
+        {
+          X[s*(in_num+out_num)+i] = OUT[s*out_num+k];
+        }
+      }
+      //bottle_neck->initialize_weights(input_branch[input_branch.size()-1],output_branch[output_branch.size()-1]); // initialize weights to transpose of previous layer weights M_i -> W = M_{i-1} -> W ^ T
+      bottle_neck->train(X,n_samp,total_n,n_cd,epsilon,in_num+out_num);
+      delete [] X;
+      X = NULL;
+    }
+    delete [] IN;
+    IN = NULL;
+    delete [] OUT;
+    OUT = NULL;
+    model_ready = true;
+  }
+  double compare(long sample,double * a,double * b)
+  {
+    double sum_a = 0;
+    double sum_b = 0;
+    for(int i=0;i<out_samp;i++)
+    {
+      sum_a += a[sample*out_samp+i];
+      sum_b += b[sample*out_samp+i];
+    }
+    for(int i=0;i<out_samp;i++)
+    {
+      a[sample*out_samp+i] = (a[sample*out_samp+i]+1e-5)/(sum_a+1e-5);
+      b[sample*out_samp+i] = (b[sample*out_samp+i]+1e-5)/(sum_b+1e-5);
+    }
+    double score = 0;
+    for(int i=0;i<out_samp;i++)
+    {
+      score += ((a[sample*out_samp+i]>0.5&&b[sample*out_samp+i]>0.5)||(a[sample*out_samp+i]<0.5&&b[sample*out_samp+i]<0.5))?1:0;
+    }
+    return score/out_samp;
+  }
+  void compare_all(long num,double * in,double * out)
+  {
+    double score = 0;
+    for(long i=0;i<num;i++)
+    {
+      score += (compare(i,in,out)-score)/(1+i);
+      for(int j=0;j<out_samp;j++)
+      {
+        std::cout << ((in[i*out_samp+j]>0.5)?"1":"0") << ":" << ((out[i*out_samp+j]>0.5)?"1":"0") << "\t";
+      }
+    }
+    std::cout << std::endl;
+    for(long i=0;i<num;i++)
+    {
+      for(int j=0;j<out_samp;j++)
+      {
+        std::cout << in[i*out_samp+j] << ":" << out[i*out_samp+j] << "\t";
+      }
+    }
+    std::cout << std::endl;
+    std::cout << "score:" << score << std::endl;
+    //char ch;
+    //std::cin >> ch;
+  }
+  void model_all(long num,double * in,double * out)
+  {
+    for(long i=0;i<num;i++)
+    {
+      model_simple(i,in,out);
+    }
+  }
+};
+
+mRBM * mrbm = NULL;
 
 /*
  
@@ -38,36 +1946,36 @@
 
 */
 
-float max(float a,float b)
+double max(double a,double b)
 {
   return (a>b)?a:b;
 }
 
-float min(float a,float b)
+double min(double a,double b)
 {
   return (a>b)?b:a;
 }
 
-float fabs(float a)
+double fabs(double a)
 {
   return (a>0)?a:-a;
 }
 
 struct Point
 {
-  float t;
-  float x,y;
-  Point(float _x,float _y):x(_x),y(_y){}
-  float dist(Point const & a,float alpha)
+  double t;
+  double x,y;
+  Point(double _x,double _y):x(_x),y(_y){}
+  double dist(Point const & a,double alpha)
   {
     return pow(sqrt((x-a.x)*(x-a.x) + (y-a.y)*(y-a.y)),alpha);
   }
 };
 
-float total_dist(std::vector<Point> & pts,float alpha = 1)
+double total_dist(std::vector<Point> & pts,double alpha = 1)
 {
-  float temp_dist;
-  float total_dist = 0;
+  double temp_dist;
+  double total_dist = 0;
   pts[0].t = total_dist;
   for(int i=1;i<pts.size();i++)
   {
@@ -77,7 +1985,7 @@ float total_dist(std::vector<Point> & pts,float alpha = 1)
   }
 }
 
-int find(std::vector<Point> & pts,float t)
+int find(std::vector<Point> & pts,double t)
 {
   for(int i=1;i<pts.size();i++)
   {
@@ -85,7 +1993,7 @@ int find(std::vector<Point> & pts,float t)
   }
 }
 
-Point CatmulRom(std::vector<Point> & pts,float t)
+Point CatmulRom(std::vector<Point> & pts,double t)
 {
   int ind0 = (int)find(pts,t)-1;
   int ind1 = (int)find(pts,t);
@@ -103,31 +2011,31 @@ Point CatmulRom(std::vector<Point> & pts,float t)
   if(ind3>=pts.size())ind3 = pts.size()-1;
   //std::cout << t << "~~~~" << pts[ind0].t << '\t' << pts[ind1].t << '\t' << pts[ind2].t << '\t' << pts[ind3].t << std::endl;
   //std::cout << "^^^^" << pts[ind0].x << '\t' << pts[ind1].x << '\t' << pts[ind2].x << '\t' << pts[ind3].x << std::endl;
-  float d10 = pts[ind1].t - pts[ind0].t;
-  float d21 = pts[ind2].t - pts[ind1].t;
-  float d32 = pts[ind3].t - pts[ind2].t;
-  float A1x = (d10>1e-5)?(pts[ind0].x*(pts[ind1].t-t) + pts[ind1].x*(t-pts[ind0].t))/d10:pts[ind0].x;
-  float A1y = (d10>1e-5)?(pts[ind0].y*(pts[ind1].t-t) + pts[ind1].y*(t-pts[ind0].t))/d10:pts[ind0].y;
-  float A2x = (d21>1e-5)?(pts[ind1].x*(pts[ind2].t-t) + pts[ind2].x*(t-pts[ind1].t))/d21:pts[ind1].x;
-  float A2y = (d21>1e-5)?(pts[ind1].y*(pts[ind2].t-t) + pts[ind2].y*(t-pts[ind1].t))/d21:pts[ind1].y;
-  float A3x = (d32>1e-5)?(pts[ind2].x*(pts[ind3].t-t) + pts[ind3].x*(t-pts[ind2].t))/d32:pts[ind2].x;
-  float A3y = (d32>1e-5)?(pts[ind2].y*(pts[ind3].t-t) + pts[ind3].y*(t-pts[ind2].t))/d32:pts[ind2].y;
+  double d10 = pts[ind1].t - pts[ind0].t;
+  double d21 = pts[ind2].t - pts[ind1].t;
+  double d32 = pts[ind3].t - pts[ind2].t;
+  double A1x = (d10>1e-5)?(pts[ind0].x*(pts[ind1].t-t) + pts[ind1].x*(t-pts[ind0].t))/d10:pts[ind0].x;
+  double A1y = (d10>1e-5)?(pts[ind0].y*(pts[ind1].t-t) + pts[ind1].y*(t-pts[ind0].t))/d10:pts[ind0].y;
+  double A2x = (d21>1e-5)?(pts[ind1].x*(pts[ind2].t-t) + pts[ind2].x*(t-pts[ind1].t))/d21:pts[ind1].x;
+  double A2y = (d21>1e-5)?(pts[ind1].y*(pts[ind2].t-t) + pts[ind2].y*(t-pts[ind1].t))/d21:pts[ind1].y;
+  double A3x = (d32>1e-5)?(pts[ind2].x*(pts[ind3].t-t) + pts[ind3].x*(t-pts[ind2].t))/d32:pts[ind2].x;
+  double A3y = (d32>1e-5)?(pts[ind2].y*(pts[ind3].t-t) + pts[ind3].y*(t-pts[ind2].t))/d32:pts[ind2].y;
   //std::cout << "^^^" << A1x << '\t' << A2x << '\t' << A3x << std::endl;
-  float d20 = pts[ind2].t - pts[ind0].t;
-  float d31 = pts[ind3].t - pts[ind1].t;
-  float B1x = (d20>1e-5)?(A1x*(pts[ind2].t-t) + A2x*(t-pts[ind0].t))/d20:A1x;
-  float B1y = (d20>1e-5)?(A1y*(pts[ind2].t-t) + A2y*(t-pts[ind0].t))/d20:A1y;
-  float B2x = (d31>1e-5)?(A2x*(pts[ind3].t-t) + A3x*(t-pts[ind1].t))/d31:A2x;
-  float B2y = (d31>1e-5)?(A2y*(pts[ind3].t-t) + A3y*(t-pts[ind1].t))/d31:A2y;
+  double d20 = pts[ind2].t - pts[ind0].t;
+  double d31 = pts[ind3].t - pts[ind1].t;
+  double B1x = (d20>1e-5)?(A1x*(pts[ind2].t-t) + A2x*(t-pts[ind0].t))/d20:A1x;
+  double B1y = (d20>1e-5)?(A1y*(pts[ind2].t-t) + A2y*(t-pts[ind0].t))/d20:A1y;
+  double B2x = (d31>1e-5)?(A2x*(pts[ind3].t-t) + A3x*(t-pts[ind1].t))/d31:A2x;
+  double B2y = (d31>1e-5)?(A2y*(pts[ind3].t-t) + A3y*(t-pts[ind1].t))/d31:A2y;
   //std::cout << "^^" << B1x << '\t' << B2x << std::endl;
-  float Cx  = (d21>1e-5)?(B1x*(pts[ind2].t-t) + B2x*(t-pts[ind1].t))/d21:B1x;
-  float Cy  = (d21>1e-5)?(B1y*(pts[ind2].t-t) + B2y*(t-pts[ind1].t))/d21:B1y;
+  double Cx  = (d21>1e-5)?(B1x*(pts[ind2].t-t) + B2x*(t-pts[ind1].t))/d21:B1x;
+  double Cy  = (d21>1e-5)?(B1y*(pts[ind2].t-t) + B2y*(t-pts[ind1].t))/d21:B1y;
   //std::cout << "^" << Cx << "\t" << Cy << std::endl;
   return Point(Cx,Cy);
 }
 
 
-Point estimate_derivative(std::vector<Point> & pts,float a,float dx)
+Point estimate_derivative(std::vector<Point> & pts,double a,double dx)
 {
   Point p1 = CatmulRom(pts,a-dx);
   Point p2 = CatmulRom(pts,a+dx);
@@ -139,6 +2047,7 @@ struct price
 
   price()
   {
+    synthetic = false;
     EMA = 0;
     EMA1 = 0;
     EMS = 0;
@@ -146,20 +2055,21 @@ struct price
   }
 
   // these quantities are ground truth
+  bool synthetic;
   int index;
   std::string date;
-  float open;
-  float close;
-  float high;
-  float low;
+  double open;
+  double close;
+  double high;
+  double low;
   int volume;
 
   // these quantities are derived from the values above
   
-  float EMA_MACD; // temporary ema MACD
-  float calculate_ema_macd(std::vector<price> & prices,int N)
+  double EMA_MACD; // temporary ema MACD
+  double calculate_ema_macd(std::vector<price> & prices,int N)
   {
-    float a = 2.0f / ( 1.0f + N );
+    double a = 2.0f / ( 1.0f + N );
     if(index>=N)
     {
       EMA_MACD = a * (MACD_line - prices[index-1].EMA_MACD) + prices[index-1].EMA_MACD;
@@ -171,10 +2081,10 @@ struct price
       return EMA_MACD;
     }
   }
-  float EMA_MACD1; // temporary ema MACD
-  float calculate_ema_macd1(std::vector<price> & prices,int N)
+  double EMA_MACD1; // temporary ema MACD
+  double calculate_ema_macd1(std::vector<price> & prices,int N)
   {
-    float a = 2.0f / ( 1.0f + N );
+    double a = 2.0f / ( 1.0f + N );
     if(index>=N)
     {
       EMA_MACD1 = a * (MACD_line - prices[index-1].EMA_MACD1) + prices[index-1].EMA_MACD1;
@@ -186,10 +2096,10 @@ struct price
       return EMA_MACD1;
     }
   }
-  float EMA; // temporary ema
-  float calculate_ema(std::vector<price> & prices,int N)
+  double EMA; // temporary ema
+  double calculate_ema(std::vector<price> & prices,int N)
   {
-    float a = 2.0f / ( 1.0f + N );
+    double a = 2.0f / ( 1.0f + N );
     if(index>=N)
     {
       EMA = a * (close - prices[index-1].EMA) + prices[index-1].EMA;
@@ -201,10 +2111,10 @@ struct price
       return EMA;
     }
   }
-  float EMA1; // temporary ema
-  float calculate_ema1(std::vector<price> & prices,int N)
+  double EMA1; // temporary ema
+  double calculate_ema1(std::vector<price> & prices,int N)
   {
-    float a = 2.0f / ( 1.0f + N );
+    double a = 2.0f / ( 1.0f + N );
     if(index>=N)
     {
       EMA1 = a * (close - prices[index-1].EMA1) + prices[index-1].EMA1;
@@ -216,10 +2126,10 @@ struct price
       return EMA1;
     }
   }
-  float EMS; // temporary ems
-  float calculate_ems(std::vector<price> & prices,float mean,int N)
+  double EMS; // temporary ems
+  double calculate_ems(std::vector<price> & prices,double mean,int N)
   {
-    float a = 2.0f / ( 1.0f + N );
+    double a = 2.0f / ( 1.0f + N );
     if(index>=N)
     {
       EMS = a * ((close - mean)*(close - mean) - prices[index-1].EMS) + prices[index-1].EMS;
@@ -231,10 +2141,10 @@ struct price
       return EMS;
     }
   }
-  float EMS1; // temporary ems
-  float calculate_ems1(std::vector<price> & prices,float mean,int N)
+  double EMS1; // temporary ems
+  double calculate_ems1(std::vector<price> & prices,double mean,int N)
   {
-    float a = 2.0f / ( 1.0f + N );
+    double a = 2.0f / ( 1.0f + N );
     if(index>=N)
     {
       EMS1 = a * ((close - mean)*(close - mean) - prices[index-1].EMS1) + prices[index-1].EMS1;
@@ -246,10 +2156,10 @@ struct price
       return EMS1;
     }
   }
-  float EMAV; // temporary ema
-  float calculate_ema_volume(std::vector<price> & prices,int N)
+  double EMAV; // temporary ema
+  double calculate_ema_volume(std::vector<price> & prices,int N)
   {
-    float a = 2.0f / ( 1.0f + N );
+    double a = 2.0f / ( 1.0f + N );
     if(index>=N)
     {
       EMAV = a * (volume - prices[index-1].EMAV) + prices[index-1].EMAV;
@@ -261,8 +2171,8 @@ struct price
       return EMAV;
     }
   }
-  float SMAV; // temporary simple moving average
-  float calculate_sma_volume(std::vector<price> & prices,int N)
+  double SMAV; // temporary simple moving average
+  double calculate_sma_volume(std::vector<price> & prices,int N)
   {
     if(index>=N)
     {
@@ -293,7 +2203,7 @@ struct price
   bool Volume_spike_loss;
   bool Volume_gain;
   bool Volume_loss;
-  void calculate_Volume_spike(std::vector<price> & prices,int N=5,float tolerance=2.0f)
+  void calculate_Volume_spike(std::vector<price> & prices,int N=5,double tolerance=2.0f)
   {
     Volume_spike = volume > tolerance * SMAV;
     Volume_spike_gain = false;
@@ -323,7 +2233,7 @@ struct price
       }
     }
   }
-  static void initialize_Volume_spike(std::vector<price> & prices, int N=5,float tolerance=2.0f)
+  static void initialize_Volume_spike(std::vector<price> & prices, int N=5,double tolerance=2.0f)
   {
     for(int i=0;i<prices.size();i++)
     {
@@ -338,10 +2248,10 @@ struct price
   // RSI 
   // 100 - 100/(1+RS)
   // RS = Average Gain / Average Loss
-  float average_gain;
-  float average_loss;
-  float RS;
-  float RSI;
+  double average_gain;
+  double average_loss;
+  double RS;
+  double RSI;
   bool RSI_buy;
   bool RSI_sell;
   void calculate_RSI(std::vector<price> & prices,int N=14)
@@ -448,10 +2358,10 @@ struct price
   // MFI 
   // 100 - 100/(1+MF)
   // MF = Average TP Gain * Gain Volume / Average TP Loss * Loss Volume
-  float raw_money_flow_gain;
-  float raw_money_flow_loss;
-  float MF;
-  float MFI;
+  double raw_money_flow_gain;
+  double raw_money_flow_loss;
+  double MF;
+  double MFI;
   bool MFI_buy;
   bool MFI_sell;
   void calculate_MFI(std::vector<price> & prices,int N=14)
@@ -557,10 +2467,10 @@ struct price
   }
 
   // Golden cross
-  float ema_50;
-  float ema_200;
-  float ems_50;
-  float ems_200;
+  double ema_50;
+  double ema_200;
+  double ems_50;
+  double ems_200;
   bool GoldenCross_uptrend;
   bool GoldenCross_downtrend;
   void calculate_GoldenCross_uptrend(std::vector<price> & prices,int N1=50,int N2=200)
@@ -614,14 +2524,14 @@ struct price
   }
 
   // MACD
-  float ema_12;
-  float ema_26;
-  float ems_12;
-  float ems_26;
-  float MACD_line;
-  float MACD_signal;
-  float MACD_dline;
-  float MACD_dsignal;
+  double ema_12;
+  double ema_26;
+  double ems_12;
+  double ems_26;
+  double MACD_line;
+  double MACD_signal;
+  double MACD_dline;
+  double MACD_dsignal;
   bool MACD_uptrend;
   bool MACD_downtrend;
   void calculate_MACD_signal(std::vector<price> & prices,int N=9,int N1=12,int N2=26)
@@ -725,7 +2635,7 @@ struct price
       MACD_downtrend = false;
     }
   }
-  static void initialize_MACD(std::vector<price> & prices,int N=9,int N1=12,int N2=26)
+  static void initialize_MACD(std::vector<price> & prices,bool awesome_macd=false,int N=9,int N1=12,int N2=26)
   {
     for(int i=0;i<prices.size();i++)
     {
@@ -739,7 +2649,10 @@ struct price
     {
       prices[i].calculate_MACD_signal(prices,N,N1,N2);
     }
-    calculate_MACD_dsignal(prices);
+    if(awesome_macd)
+    {
+      calculate_MACD_dsignal(prices);
+    }
   }
 
   // DOJI - open and close price are very similar
@@ -757,10 +2670,10 @@ struct price
   }
 
   // CCI
-  float TP; // typical price = (high + low + close)/3
-  float smtp_cci; // 20 day simple moving average of Typical Price (TP)
-  float MD_cci; // 20 day mean deviation = sum_n |TP - smtp_n|/n
-  float CCI; // (TP - 20d SMTP) / (.015 MD)
+  double TP; // typical price = (high + low + close)/3
+  double smtp_cci; // 20 day simple moving average of Typical Price (TP)
+  double MD_cci; // 20 day mean deviation = sum_n |TP - smtp_n|/n
+  double CCI; // (TP - 20d SMTP) / (.015 MD)
   bool CCI_buy, CCI_sell;
   static void initialize_CCI(std::vector<price> & prices,int N = 20)
   {
@@ -914,7 +2827,7 @@ struct price
   }
 
   // initialize all indicators 
-  static void initialize_indicators(std::vector<price> & prices)
+  static void initialize_indicators(std::vector<price> & prices,bool awesome_macd)
   {
     for(int i=0;i<prices.size();i++)
     {
@@ -922,7 +2835,7 @@ struct price
     }
     initialize_CCI(prices);
     initialize_doji(prices);
-    initialize_MACD(prices);
+    initialize_MACD(prices,awesome_macd);
     initialize_GoldenCross(prices);
     initialize_engulfing_patterns(prices);
     initialize_RSI(prices);
@@ -973,17 +2886,17 @@ bool comparator_volume(price a,price b){return a.volume < b.volume;}
 
 struct Bin
 {
-  float price_min;
-  float price_max;
-  float sum;
-  float sum_neg;
-  float sum_pos;
-  bool in(float price)
+  double price_min;
+  double price_max;
+  double sum;
+  double sum_neg;
+  double sum_pos;
+  bool in(double price)
   {
     return price>=price_min&&price<price_max;
   }
   std::vector<price> collection;
-  Bin(float _price_min,float _price_max)
+  Bin(double _price_min,double _price_max)
   {
     price_min = _price_min;
     price_max = _price_max;
@@ -1009,13 +2922,13 @@ struct Bin
 
 struct VolumeByPrice
 {
-  float max_sum;
+  double max_sum;
   std::vector<Bin> bins;
   void create_bins(std::vector<price> & prices,int nbins,int min_index,int max_index)
   {
-    float max_price = float(std::max_element(prices.begin()+min_index,prices.begin()+max_index,comparator)->close);
-    float min_price = float(std::min_element(prices.begin()+min_index,prices.begin()+max_index,comparator)->close);
-    float bin_size = (max_price-min_price)/nbins;
+    double max_price = double(std::max_element(prices.begin()+min_index,prices.begin()+max_index,comparator)->close);
+    double min_price = double(std::min_element(prices.begin()+min_index,prices.begin()+max_index,comparator)->close);
+    double bin_size = (max_price-min_price)/nbins;
     for(int i=0;i<nbins;i++)
     {
       bins.push_back(Bin(min_price+bin_size*i,min_price+(i+1)*bin_size));
@@ -1048,9 +2961,9 @@ struct VolumeByPrice
   }
 };
 
-void generate_synthetic(std::vector<price> & prices,float multiplier,int nyears)
+void generate_synthetic(std::vector<price> & prices,double multiplier,int nyears)
 {
-  float value = (rand()%10000000)/10000.0;
+  double value = (rand()%10000000)/10000.0;
   int date = 1;
   int nweeks = (int)(nyears*52.1429);
   for(int w=0;w<nweeks;w++)
@@ -1132,7 +3045,7 @@ void read_data(std::string filename,std::vector<price> & prices)
   }
 }
 
-void read_data_yahoo(std::string filename,std::vector<price> & prices)
+void read_data_yahoo(std::string filename,std::vector<price> & prices,int synthetic_days=0)
 {
   std::ifstream infile(filename.c_str());
   std::string line;
@@ -1178,6 +3091,17 @@ void read_data_yahoo(std::string filename,std::vector<price> & prices)
     }
   }
   infile.close();
+  for(int i=0;i<synthetic_days;i++)
+  {
+    price D;
+    D.synthetic=true;
+    D.open  =prices[prices.size()-1].open;
+    D.low   =prices[prices.size()-1].low;
+    D.high  =prices[prices.size()-1].high;
+    D.close =prices[prices.size()-1].close;
+    D.volume=prices[prices.size()-1].volume;
+    prices.push_back(D);
+  }
   for(int i=0;i<prices.size();i++)
   {
     prices[i].index = i;
@@ -1198,9 +3122,9 @@ struct Symbol
 {
   int index;
   std::string name;
-  float units;
-  float buy_price;
-  Symbol(float _units,float _buy_price,std::string _name,int _index)
+  double units;
+  double buy_price;
+  Symbol(double _units,double _buy_price,std::string _name,int _index)
     : units(_units)
     , buy_price(_buy_price)
     , name(_name)
@@ -1221,10 +3145,10 @@ struct Symbol
 struct User
 {
   std::string name;
-  float prev_cash;
-  float cash;
+  double prev_cash;
+  double cash;
   std::map<int,Symbol> rstocks;
-  User(std::string _name,float _cash,std::vector<int> & _rsymbol)
+  User(std::string _name,double _cash,std::vector<int> & _rsymbol)
   {
     name = _name;
     cash = _cash;
@@ -1248,7 +3172,7 @@ struct User
   {
     sell(symbol,rstocks[symbol].units,date_index);
   }
-  bool buy(int symbol,float units,int date_index) // date_index counts backwards from last possible date
+  bool buy(int symbol,double units,int date_index) // date_index counts backwards from last possible date
   {
     std::cout << prices[symbol][prices[symbol].size()-1-date_index].date << ": User <" << name << "> attempting to buy " << units << " of " << symbols[symbol] << "." << std::endl;
     std::cout << "Available cash: $" << cash << std::endl;
@@ -1265,7 +3189,7 @@ struct User
     }
     return false;
   }
-  bool sell(int symbol,float units,int date_index) // date_index counts backwards from last possible date
+  bool sell(int symbol,double units,int date_index) // date_index counts backwards from last possible date
   {
     std::cout << prices[symbol][prices[symbol].size()-1-date_index].date << ": User <" << name << "> attempting to sell " << units << " of " << symbols[symbol] << "." << std::endl;
     std::cout << symbols[symbol] << " price: $" << prices[symbol][prices[symbol].size()-1-date_index].low << std::endl;
@@ -1281,11 +3205,11 @@ struct User
     }
     return false;
   }
-  float expected_return(int date_index)
+  double expected_return(int date_index)
   {
     if(cash<1e-5){}
     else{prev_cash=cash;}
-    float val = cash;
+    double val = cash;
     std::map<int,Symbol>::iterator it = rstocks.begin();
     while(it!=rstocks.end())
     {
@@ -1298,79 +3222,219 @@ struct User
 
 struct Robot
 {
+  long num_elems;
+  long num_bits;
+  long num_out_bits;
+  Robot()
+  {
+    num_elems = 0;
+    num_bits = 1;
+    num_out_bits = 1;
+  }
   User * user;
-  void predict(std::vector<bool> const & input, std::vector<bool> & output)
+  void predict(std::vector<double> const & input, std::vector<double> & output)
   {
 
   }
-  void train(std::vector<bool> const & input, std::vector<bool> const & output)
+  void train(std::vector<double> const & input, std::vector<double> const & output)
   {
 
   }
-  std::vector<bool> construct_input_vector(price p)
+  long get_input_size(long range)
   {
-    std::vector<bool> input;
-    input.push_back(p.CCI_buy);
-    input.push_back(p.CCI_sell);
-    input.push_back(p.RSI_buy);
-    input.push_back(p.RSI_sell);
-    input.push_back(p.MFI_buy);
-    input.push_back(p.MFI_sell);
-    input.push_back(p.close > p.ema_12+1.5*p.ems_12);
-    input.push_back(p.close < p.ema_12-1.5*p.ems_12);
-    input.push_back(p.MACD_uptrend);
-    input.push_back(p.MACD_downtrend);
-    input.push_back(p.GoldenCross_uptrend);
-    input.push_back(p.GoldenCross_downtrend);
-    input.push_back(p.MACD_dline>0&&p.MACD_dsignal>0);
-    input.push_back(p.MACD_dline<0&&p.MACD_dsignal<0);
+    std::vector<double> input;
+    //for(long i=0;i<num_bits;i++)
+    //    input.push_back(0/*p.CCI*/);
+    //for(long i=0;i<num_bits;i++)
+    //    input.push_back(0/*p.RSI*/);
+    //for(long i=0;i<num_bits;i++)
+    //    input.push_back(0/*p.MFI*/);
+    //for(long i=0;i<num_bits;i++)
+    //    input.push_back(0/*p.close > p.ema_12+1.5*p.ems_12*/);
+    //for(long i=0;i<num_bits;i++)
+    //    input.push_back(0/*p.MACD_dline>0&&p.MACD_dsignal>0*/);
+    //for(long i=0;i<num_bits;i++)
+    //    input.push_back(0/*p.MACD_dline<0&&p.MACD_dsignal<0*/);
+    return input.size()+num_bits*(range-1);
+  }
+  long get_output_size(long range)
+  {
+    return num_out_bits;//*(range-1);
+  }
+  void encode(std::vector<double> & vec,double dat,double min_dat,double max_dat,long num)
+  {
+    
+    if(dat<min_dat)dat=min_dat+1e-5;
+    if(dat>max_dat)dat=max_dat-1e-5;
+    double val = ((dat-min_dat)/(max_dat-min_dat));
+    vec.push_back(val);
+    
+  }
+  std::vector<double> construct_input_vector(price p,std::vector<price> const & prev)
+  {
+    std::vector<double> input;
+    //encode(input,p.CCI,-150,150,num_bits);
+    //encode(input,p.RSI,0,100,num_bits);
+    //encode(input,p.MFI,0,100,num_bits);
+    //encode(input,100*(p.close - p.ema_12)/p.ems_12,-150,150,num_bits);
+    //encode(input,p.MACD_dline,-2,2,num_bits);
+    //encode(input,p.MACD_dsignal,-2,2,num_bits);
+    encode(input,100*(p.close-prev[0].close)/p.close,-2,2,num_bits);
+    int i=prev.size()-2;
+    for(;i>=0;i--)
+    {
+      encode(input,100*(prev[i].close-prev[i+1].close)/prev[i].close,-2,2,num_bits);
+    }
     return input;
   }
-  std::vector<bool> construct_output_vector(price p,std::vector<price> const & prev)
+  std::vector<double> construct_output_vector(price p,std::vector<price> const & next)
   {
-    std::vector<bool> output;
-    for(int i=0;i<2*prev.size();i++)
+    std::vector<double> output;
+    for(int i=0;i<1/*next.size()*/;i++)
     {
-      output.push_back((p.close-prev[i/2].close)/prev[i/2].close > 0.05);
-      output.push_back((p.close-prev[i/2].close)/prev[i/2].close <-0.05);
+      encode(output,100*(p.close-next[i].close)/p.close,-2,2,num_out_bits);
     }
     return output;
   }
-  void print(price p,std::vector<price> const & prev)
+  void generate ( std::string symb
+                , price p
+                , std::vector<price> const & prev
+                , std::vector<price> const & next
+                , long & in_off
+                , long & out_off
+                , double * in_dump
+                , double * out_dump
+                , long & in_size
+                , long & out_size
+                , long & samples
+                )
   {
-    std::cout << p.date << ":";
-    std::vector<bool> input = construct_input_vector(p);
-    std::vector<bool> output = construct_output_vector(p,prev);
-    for(int i=0;i<input.size();i++)
+    std::vector<double> input = construct_input_vector(p,prev);
+    std::vector<double> output = construct_output_vector(p,next);
+    in_size = input.size();
+    out_size = output.size();
     {
-      std::cout << ((input[i])?"1":"0");
+      std::cout << symb << ":";
+      std::cout << p.date << ":";
+      for(int i=0;i<input.size();i++)
+      {
+        if(i%num_bits==0&&i>0)std::cout << "|";
+        std::cout << ((input[i]>0.5)?"1":"0");
+        in_dump[in_off+i] = ((input[i]));
+      }
+      std::cout << ":";
+      for(int i=0;i<output.size();i++)
+      {
+        std::cout << ((output[i]>0.5)?"1":"0");
+        out_dump[out_off+i] = ((output[i]));
+      }
+      std::cout << std::endl;
+      in_off += in_size;
+      out_off += out_size;
+      samples ++;
+      num_elems = samples;
     }
-    std::cout << ":";
-    for(int i=0;i<output.size();i++)
-    {
-      std::cout << ((output[i])?"1":"0");
-    }
-    std::cout << std::endl;
   }
 };
 
+struct mrbm_params
+{
+
+  long batch_iter;
+  long num_batch;
+  long total_n;
+  long n;
+  double epsilon;
+  long n_iter;
+  long n_cd;
+
+  long v;
+  long h;
+
+  std::vector<long> input_sizes;
+
+  std::vector<long> output_sizes;
+
+  std::vector<long> input_iters;
+
+  std::vector<long> output_iters;
+
+  long bottleneck_iters;
+
+  mrbm_params(Robot* robot,int range,long n_batch,long n_samples,double c_epsilon)
+  {
+
+    v  = robot->get_input_size(range);
+    h  = robot->get_output_size(range);
+
+    n_cd = 1;
+    num_batch = n_batch;
+    batch_iter = 1;
+    n = n_samples;
+    total_n = n_samples;
+    epsilon = c_epsilon;
+    n_iter = 1000;
+
+    input_sizes.push_back(v);
+    input_sizes.push_back(v);
+    input_sizes.push_back(v);
+    input_sizes.push_back(v);
+
+    output_sizes.push_back(h);
+
+    for(int i=0;i+1<input_sizes.size();i++)
+        input_iters.push_back(n_iter);
+
+    for(int i=0;i+1<output_sizes.size();i++)
+        output_iters.push_back(n_iter);
+
+    bottleneck_iters = n_iter;
+
+  }
+};
+
+void run_mrbm(mrbm_params p,double * dat_in,double * dat_out,double * prd_out)
+{
+  int cd = 0;
+  while(true)
+  {
+    if(mrbm == NULL)
+    {
+      mrbm = new mRBM(p.input_sizes[0],p.output_sizes[0]);
+      for(long i=0;i+1<p.input_sizes.size();i++)
+      {
+        mrbm->input_branch.push_back(new DataUnit(p.input_sizes[i],p.input_sizes[i+1],p.input_iters[i]));
+      }
+      for(long i=0;i+1<p.output_sizes.size();i++)
+      {
+        mrbm->output_branch.push_back(new DataUnit(p.output_sizes[i],p.output_sizes[i+1],p.output_iters[i]));
+      }
+      long bottle_neck_num = (p.input_sizes[p.input_sizes.size()-1]+p.output_sizes[p.output_sizes.size()-1]);
+      mrbm->bottle_neck = new DataUnit(p.input_sizes[p.input_sizes.size()-1]+p.output_sizes[p.output_sizes.size()-1],bottle_neck_num,p.bottleneck_iters);
+    }
+    mrbm->train(p.v,p.h,p.num_batch,p.total_n,(int)(p.n_cd+0.05*cd),p.epsilon/(1+0.05*cd),dat_in,dat_out);
+    mrbm->model_all(p.total_n,dat_in,prd_out);
+    mrbm->compare_all(p.total_n,dat_out,prd_out);
+    cd ++;
+  }
+}
+
 Robot * robot = new Robot();
 
-int width  = 1800;
+int width  = 1000;//1800;
 int height = 1000;
 
 int mouse_x = 0;
 int mouse_y = 0;
 
 int stock_index = 0;
-float view_fraction = 1.0f;
 
 int start_index = -1;
 int   end_index = -1;
 bool pick_start_index = false;
 bool   pick_end_index = false;
 
-void drawString (void * font, char const *s, float x, float y, float z)
+void drawString (void * font, char const *s, double x, double y, double z)
 {
      unsigned int i;
      glRasterPos3f(x, y, z);
@@ -1382,7 +3446,7 @@ void drawString (void * font, char const *s, float x, float y, float z)
 
 User * user = NULL;
 
-void draw()
+void draw_charts()
 {
   glColor3f(1,1,1);
   if(!game_mode)drawString(GLUT_BITMAP_HELVETICA_18,symbols[stock_index].c_str(),-0.6,0.9,0);
@@ -1424,54 +3488,90 @@ void draw()
   drawString(GLUT_BITMAP_HELVETICA_18,"RSI",-1,-0.50,0);
   drawString(GLUT_BITMAP_HELVETICA_18,"MFI",-1,-0.70,0);
   drawString(GLUT_BITMAP_HELVETICA_18,"CCI",-1,-0.90,0);
-  //int n = prices[stock_index].size()*view_fraction;
   int n = start_date_index - end_date_index;
+  if(n>=prices[stock_index].size())
+  {
+    n = prices[stock_index].size()-1;
+  }
   int size = prices[stock_index].size()-1-end_date_index;
-  float open_price = 0;
-  float close_price = 0;
-  float high_price = 0;
-  float low_price = 0;
+  double open_price = 0;
+  double close_price = 0;
+  double high_price = 0;
+  double low_price = 0;
+  int volume = 0;
   std::string date = "";
-  //int price_index = (int)((size*(1.0f-view_fraction))+(((float)mouse_x/width)*(size*view_fraction))-0.5f) + 2;
-  int price_index = (int)((size-n)+(((float)mouse_x/width)*(n))-0.5f) + 1;
+  int price_index = (int)((size-n)+(((double)mouse_x/width)*(n)));
   if(price_index>=0&&price_index<prices[stock_index].size())
   {
-    open_price = prices[stock_index][price_index].open;
-    close_price = prices[stock_index][price_index].close;
-    high_price = prices[stock_index][price_index].high;
-    low_price = prices[stock_index][price_index].low;
-    date = prices[stock_index][price_index].date;
+    open_price  = prices[stock_index][prices[stock_index].size()-1].open;
+    close_price = prices[stock_index][prices[stock_index].size()-1].close;
+    high_price  = prices[stock_index][prices[stock_index].size()-1].high;
+    low_price   = prices[stock_index][prices[stock_index].size()-1].low;
+    volume      = prices[stock_index][prices[stock_index].size()-1].volume;
+    date        = prices[stock_index][prices[stock_index].size()-1].date;
+    // Current
+    std::stringstream ss_date;
+    ss_date << date << std::endl;
+    std::stringstream ss_open_price;
+    ss_open_price << "Open:" << open_price << std::endl;
+    std::stringstream ss_close_price;
+    ss_close_price << "Close:" << close_price << std::endl;
+    std::stringstream ss_low_price;
+    ss_low_price << "Low:" << low_price << std::endl;
+    std::stringstream ss_high_price;
+    ss_high_price << "High:" << high_price << std::endl;
+    std::stringstream ss_volume;
+    ss_volume << "Volume:" << volume << std::endl;
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_date.str().c_str()       ,-1.0f,-1.0f+0.25f,0);
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_open_price.str().c_str() ,-1.0f,-1.0f+0.20f,0);
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_close_price.str().c_str(),-1.0f,-1.0f+0.15f,0);
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_high_price.str().c_str() ,-1.0f,-1.0f+0.10f,0);
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_low_price.str().c_str()  ,-1.0f,-1.0f+0.05f,0);
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_volume.str().c_str()     ,-1.0f,-1.0f+0.00f,0);
   }
-  std::stringstream ss_date;
-  ss_date << date << std::endl;
-  std::stringstream ss_open_price;
-  ss_open_price << "Open:" << open_price << std::endl;
-  std::stringstream ss_close_price;
-  ss_close_price << "Close:" << close_price << std::endl;
-  std::stringstream ss_low_price;
-  ss_low_price << "Low:" << low_price << std::endl;
-  std::stringstream ss_high_price;
-  ss_high_price << "High:" << high_price << std::endl;
-  drawString(GLUT_BITMAP_HELVETICA_18,ss_date.str().c_str()       ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.20f,0);
-  drawString(GLUT_BITMAP_HELVETICA_18,ss_open_price.str().c_str() ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.15f,0);
-  drawString(GLUT_BITMAP_HELVETICA_18,ss_close_price.str().c_str(),-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.10f,0);
-  drawString(GLUT_BITMAP_HELVETICA_18,ss_high_price.str().c_str() ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.05f,0);
-  drawString(GLUT_BITMAP_HELVETICA_18,ss_low_price.str().c_str()  ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.00f,0);
+  if(price_index>=0&&price_index<prices[stock_index].size()&&prices[stock_index][price_index].synthetic==false)
+  {
+    open_price  = prices[stock_index][price_index].open;
+    close_price = prices[stock_index][price_index].close;
+    high_price  = prices[stock_index][price_index].high;
+    low_price   = prices[stock_index][price_index].low;
+    volume      = prices[stock_index][price_index].volume;
+    date        = prices[stock_index][price_index].date;
+    // Historical
+    std::stringstream ss_date;
+    ss_date << date << std::endl;
+    std::stringstream ss_open_price;
+    ss_open_price << "Open:" << open_price << std::endl;
+    std::stringstream ss_close_price;
+    ss_close_price << "Close:" << close_price << std::endl;
+    std::stringstream ss_low_price;
+    ss_low_price << "Low:" << low_price << std::endl;
+    std::stringstream ss_high_price;
+    ss_high_price << "High:" << high_price << std::endl;
+    std::stringstream ss_volume;
+    ss_volume << "Volume:" << volume << std::endl;
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_date.str().c_str()       ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.25f,0);
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_open_price.str().c_str() ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.20f,0);
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_close_price.str().c_str(),-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.15f,0);
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_high_price.str().c_str() ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.10f,0);
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_low_price.str().c_str()  ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.05f,0);
+    drawString(GLUT_BITMAP_HELVETICA_18,ss_volume.str().c_str()     ,-1.0f-0.15f+2.0f*mouse_x/width,1.0f-2.0f*mouse_y/height+0.00f,0);
+  }
   VolumeByPrice vol_by_price;
   vol_by_price.create_bins(prices[stock_index],12,(int)(size-n),size);
-  //float factor = 2.0f/n;
-  float factor = 2.0f/(start_date_index - end_date_index + 1);
-  float vfactor100 = 2.0f/100.0f;
-  float vfactor400 = 2.0f/600.0f;
-  float Bollinger_sigma = 1.0f;
-  float vmin    = float(std::min_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_low )->low)/1.05f;
-  float vmax    = float(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_high)->high)*1.05f;
-  float MACD_min= float(std::min_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_MACD)->MACD_dline);
-  float MACD_max= float(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_MACD)->MACD_dline);
-  float MACD_cmp= max(fabs(MACD_min),fabs(MACD_max));
+  //double factor = 2.0f/n;
+  double factor = 2.0f/(start_date_index - end_date_index + 1);
+  double vfactor100 = 2.0f/100.0f;
+  double vfactor400 = 2.0f/600.0f;
+  double Bollinger_sigma = 1.0f;
+  double vmin    = double(std::min_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_low )->low)/1.05f;
+  double vmax    = double(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_high)->high)*1.05f;
+  double MACD_min= double(std::min_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_MACD)->MACD_dline);
+  double MACD_max= double(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_MACD)->MACD_dline);
+  double MACD_cmp= max(fabs(MACD_min),fabs(MACD_max));
   //std::cout << MACD_min << "\t" << MACD_max << std::endl;
-  float vfactor = 2.0f/(vmax-vmin);
-  float vfactor_volume = 2.0f/float(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_volume)->volume);
+  double vfactor = 2.0f/(vmax-vmin);
+  double vfactor_volume = 2.0f/double(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_volume)->volume);
 
   glBegin(GL_LINES);
   // mouse 
@@ -1492,7 +3592,7 @@ void draw()
     end_index = price_index;
     pick_end_index = false;
   }
-  float chart_size = 0.05f;
+  double chart_size = 0.05f;
   glBegin(GL_LINES);
   // MACD spiral axis 
   glColor3f(1.0,1.0,1.0);
@@ -1511,7 +3611,7 @@ void draw()
   glEnd();
   glBegin(GL_LINES);
   // MACD spiral
-  for(int i=1;i<start_date_index-end_date_index;i++)
+  for(int i=1;i<n;i++)
   {
     glColor4f(1,1,1,.2f);
     if(size-i+1>start_index && size-i+1<end_index)
@@ -1540,7 +3640,8 @@ void draw()
   glEnd();
 
   glBegin(GL_LINES);
-  for(int i=1,j=0;i<start_date_index-end_date_index;i++,j++)
+  for(int i=1,j=0;i<n;i++,j++)
+  if(!prices[stock_index][size-i+1].synthetic)
   {
     glColor3f(1,1,1);
 
@@ -1593,7 +3694,8 @@ void draw()
   glEnd();
 
   glBegin(GL_QUADS);
-  for(int i=1,j=0;i<start_date_index-end_date_index;i++,j++)
+  for(int i=1,j=0;i<n;i++,j++)
+  if(!prices[stock_index][size-i+1].synthetic)
   {
     if(prices[stock_index][size-i+1].close>prices[stock_index][size-i].close)
     {
@@ -1622,7 +3724,8 @@ void draw()
   glEnd();
     
   glBegin(GL_LINES);
-  for(int i=1,j=0;i<start_date_index-end_date_index;i++,j++)
+  for(int i=1,j=0;i<n;i++,j++)
+  if(!prices[stock_index][size-i+1].synthetic)
   {
     glColor3f(1,1,1);
     // price
@@ -1665,7 +3768,8 @@ void draw()
   glEnd();
 
   glBegin(GL_QUADS);
-  for(int i=1,j=0;i<start_date_index-end_date_index;i++,j++)
+  for(int i=1,j=0;i<n;i++,j++)
+  if(!prices[stock_index][size-i+1].synthetic)
   {
     if(size-i+1 == price_index)
     {
@@ -1690,33 +3794,281 @@ void draw()
       }
     }
     // price
-    glVertex3f(1.0f-(j-0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].open -vmin) ,0);
-    glVertex3f(1.0f-(j+0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].open -vmin) ,0);
-    glVertex3f(1.0f-(j+0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close-vmin) ,0);
-    glVertex3f(1.0f-(j-0.45f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close-vmin) ,0);
+    glVertex3f(1.0f-(j-0.45f)*factor, 0.0f+0.5f*vfactor*(prices[stock_index][size-i+1].open -vmin) ,0);
+    glVertex3f(1.0f-(j+0.45f)*factor, 0.0f+0.5f*vfactor*(prices[stock_index][size-i+1].open -vmin) ,0);
+    glVertex3f(1.0f-(j+0.45f)*factor, 0.0f+0.5f*vfactor*(prices[stock_index][size-i+1].close-vmin) ,0);
+    glVertex3f(1.0f-(j-0.45f)*factor, 0.0f+0.5f*vfactor*(prices[stock_index][size-i+1].close-vmin) ,0);
 
-    glVertex3f(1.0f-(j-0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].low  -vmin) ,0);
-    glVertex3f(1.0f-(j+0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].low  -vmin) ,0);
-    glVertex3f(1.0f-(j+0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].high -vmin) ,0);
-    glVertex3f(1.0f-(j-0.05f)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].high -vmin) ,0);
+    glVertex3f(1.0f-(j-0.05f)*factor, 0.0f+0.5f*vfactor*(prices[stock_index][size-i+1].low  -vmin) ,0);
+    glVertex3f(1.0f-(j+0.05f)*factor, 0.0f+0.5f*vfactor*(prices[stock_index][size-i+1].low  -vmin) ,0);
+    glVertex3f(1.0f-(j+0.05f)*factor, 0.0f+0.5f*vfactor*(prices[stock_index][size-i+1].high -vmin) ,0);
+    glVertex3f(1.0f-(j-0.05f)*factor, 0.0f+0.5f*vfactor*(prices[stock_index][size-i+1].high -vmin) ,0);
   }
   glEnd();
 
-  {
-    std::vector<price> prcs;
-    for(int k=1;k<10;k++)
-    {
-      prcs.push_back(prices[stock_index][size+k]);
-    }
-    robot->print(prices[stock_index][size],prcs);
-  }
-
 }
+
+long learning_samples = 0;
+int learning_range = 26;
+int learning_offset = 1;
+int learning_num = 3000;
+double *  in_dump = NULL;
+double * out_dump = NULL;
+double * prd_dump = NULL;
+
+long construct_learning_data(int num,int range,int offset,double * in_dump,double * out_dump)
+{
+  std::cout << "construct learning data" << std::endl;
+  long in_off = 0;
+  long out_off = 0;
+  long in_size = 0;
+  long out_size = 0;
+  long samples = 0;
+  for(int stock_index=0;stock_index<prices.size();stock_index++)
+  {
+    if(prices[stock_index].size()>num-offset*range)
+    {
+      long size = prices[stock_index].size()-1;
+      for(long ind=range*offset;ind<num;ind++)
+      {
+        bool go = true;
+        std::vector<price> prev_prcs;
+        for(long k=1;k<range;k++)
+        {
+          if(prices[stock_index][size-offset*k-ind].synthetic){go=false;break;}
+          prev_prcs.push_back(prices[stock_index][size-offset*k-ind]);
+        }
+        if(go==false)continue;
+        std::vector<price> next_prcs;
+        for(long k=1;k<range;k++)
+        {
+          if(prices[stock_index][size+offset*k-ind].synthetic){go=false;break;}
+          next_prcs.push_back(prices[stock_index][size+offset*k-ind]);
+        }
+        if(go==false)continue;
+        robot->generate ( symbols[stock_index]
+                        , prices[stock_index][size-ind]
+                        , prev_prcs
+                        , next_prcs
+                        , in_off
+                        , out_off
+                        , in_dump
+                        , out_dump
+                        , in_size
+                        , out_size
+                        , samples
+                        );
+      }
+    }
+  }
+  std::cout << in_off << "\t" << in_size << "\t" << robot->get_input_size(range) << std::endl;
+  std::cout << out_off << "\t" << out_size << "\t" << robot->get_output_size(range) << std::endl;
+  std::cout << "done constructing learning data" << std::endl;
+  return samples;
+}
+
+long learning_selection = 0;
+
+Perceptron<double> * perceptron = NULL;
+
+double * err_stats = NULL;
+bool err_stats_changed = false;
+long err_stats_cnt = 1;
+
+void draw_learning_progress()
+{
+  if(in_dump&&out_dump)
+  {
+    int range = learning_range;
+    int  in_size = robot-> get_input_size(range);
+    int out_size = robot->get_output_size(range);
+    // draw input vector
+    {
+        double dx=0.5f/in_size;
+        double val;
+        glBegin(GL_QUADS);
+        for(int x=0;x<in_size;x++)
+        {
+            val = in_dump[learning_selection*in_size+x];
+            glColor3f(val,val,val);
+            glVertex3f(-1+0.2+ x   *dx,-1+.2     ,0);
+            glVertex3f(-1+0.2+(x+1)*dx,-1+.2     ,0);
+            glVertex3f(-1+0.2+(x+1)*dx,-1+.2+0.01,0);
+            glVertex3f(-1+0.2+ x   *dx,-1+.2+0.01,0);
+        }
+        glEnd();
+    }
+
+    // draw output vector
+    {
+        double dx=0.5f/out_size;
+        glBegin(GL_QUADS);
+        for(int x=0;x<out_size;x++)
+        {
+            double val = out_dump[learning_selection*out_size+x];
+            glColor3f(val,val,val);
+            glVertex3f(-1+1+0.2+ x   *dx,-1+.2     ,0);
+            glVertex3f(-1+1+0.2+(x+1)*dx,-1+.2     ,0);
+            glVertex3f(-1+1+0.2+(x+1)*dx,-1+.2+0.01,0);
+            glVertex3f(-1+1+0.2+ x   *dx,-1+.2+0.01,0);
+        }
+        glEnd();
+    }
+
+    // draw learning states
+    if(mrbm != NULL)
+    {
+      if(mrbm->model_ready == true)
+      {
+        double dx=0.5f/in_size;
+        //std::cout << "in_dump:\t";
+        //for(int i=0;i<in_size;i++)
+        //std::cout << in_dump[learning_selection*in_size+i] << '\t';
+        //std::cout << '\n';
+        double ** dat = mrbm->model(learning_selection,in_dump);
+        //std::cout << "dat:\t\t";
+        //for(int i=0;i<in_size;i++)
+        //std::cout << dat[0][i] << '\t';
+        //std::cout << '\n';
+        for(int l=0;l<20;l++)
+        {
+          glBegin(GL_QUADS);
+          for(int x=0;x<in_size+out_size;x++)
+          {
+              double val = 0.2+0.8*dat[l][x];
+              if(val<0)val=0;
+              if(val>1)val=1;
+              {
+                  glColor3f(val,val,val);
+              }
+              glVertex3f(-1+0.2+ x   *dx,-1+.2+0.02*(l+1)     ,0);
+              glVertex3f(-1+0.2+(x+1)*dx,-1+.2+0.02*(l+1)     ,0);
+              glVertex3f(-1+0.2+(x+1)*dx,-1+.2+0.02*(l+1)+0.01,0);
+              glVertex3f(-1+0.2+ x   *dx,-1+.2+0.02*(l+1)+0.01,0);
+          }
+          glEnd();
+        }
+        for(int i=0;i<20;i++)delete [] dat[i];
+        delete [] dat;
+        dat = NULL;
+      }
+    }
+
+    if(perceptron != NULL)
+    {
+      {
+        if(err_stats == NULL)
+        {
+          err_stats = new double[out_size];
+          for(int x=0;x<out_size;x++)
+          {
+            err_stats[x] = 0.5; 
+          }
+        }
+        double dx=0.5f/out_size;
+        double * dat = perceptron->model(in_size,out_size,&in_dump[in_size*learning_selection]);
+        if(err_stats_changed)
+        {
+          err_stats_changed = false;
+          for(int x=0;x<out_size;x++)
+          {
+            err_stats[x] += ((((dat[x]>0.5&&out_dump[out_size*learning_selection+x]>0.5)||
+                               (dat[x]<0.5&&out_dump[out_size*learning_selection+x]<0.5)
+                              )?1.0:0.0
+                             )-err_stats[x]
+                            )/err_stats_cnt; 
+          }
+          err_stats_cnt++;
+          if(err_stats_cnt>100)err_stats_cnt=100;
+        }
+        glColor3f(1,1,1);
+        for(int x=0;x<out_size;x++)
+        {
+          std::stringstream ss;
+          ss << (int)(1000*err_stats[x])/10.0f << "%";
+          drawString(GLUT_BITMAP_HELVETICA_18,ss.str().c_str(),-1.0f+1+0.2,-1+.3+0.05*x,0);
+        }
+        {
+          glBegin(GL_QUADS);
+          for(int x=0;x<out_size;x++)
+          {
+              double val = dat[x];
+              glColor3f(val,val,val);
+              glVertex3f(-1+1+0.2+ x   *dx,-1+.2+0.02     ,0);
+              glVertex3f(-1+1+0.2+(x+1)*dx,-1+.2+0.02     ,0);
+              glVertex3f(-1+1+0.2+(x+1)*dx,-1+.2+0.02+0.01,0);
+              glVertex3f(-1+1+0.2+ x   *dx,-1+.2+0.02+0.01,0);
+          }
+          glEnd();
+        }
+        delete [] dat;
+        dat = NULL;
+      }
+    }
+
+    // draw errors
+    {
+      double max_err = 0;
+      for(long k=0;k<errs.size();k++)
+      {
+        if(max_err<errs[k])max_err=errs[k];
+      }
+      glColor3f(1,1,1);
+      glBegin(GL_LINES);
+      for(long k=0;k+1<errs.size();k++)
+      {
+        glVertex3f( -1 + 2*k / ((double)errs.size()-1)
+                  , errs[k] / max_err
+                  , 0
+                  );
+        glVertex3f( -1 + 2*(k+1) / ((double)errs.size()-1)
+                  , errs[k+1] / max_err
+                  , 0
+                  );
+        glVertex3f( -1 + 2*k / ((double)errs.size()-1)
+                  , 0
+                  , 0
+                  );
+        glVertex3f( -1 + 2*(k+1) / ((double)errs.size()-1)
+                  , 0
+                  , 0
+                  );
+        glVertex3f( -1 + 2*k / ((double)errs.size()-1)
+                  , 0
+                  , 0
+                  );
+        glVertex3f( -1 + 2*k / ((double)errs.size()-1)
+                  , errs[k] / max_err
+                  , 0
+                  );
+        glVertex3f( -1 + 2*(k+1) / ((double)errs.size()-1)
+                  , 0
+                  , 0
+                  );
+        glVertex3f( -1 + 2*(k+1) / ((double)errs.size()-1)
+                  , errs[k+1] / max_err
+                  , 0
+                  );
+      }
+      glEnd();
+    }
+
+  }
+}
+
+int draw_mode = 1;
 
 void display()
 {
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-  draw();
+  if(draw_mode == 0)
+  {
+    draw_charts();
+  }
+  else
+  {
+    draw_learning_progress();
+  }
   glutSwapBuffers();
 }
 
@@ -1751,11 +4103,66 @@ void init()
   glBlendEquation(GL_FUNC_ADD);
 }
 
+void run_perceptron()
+{
+    int  num_inputs = robot-> get_input_size(learning_range);
+    int num_outputs = robot->get_output_size(learning_range);
+    std::vector<int> num_hidden;
+    num_hidden.push_back(2*max(num_outputs,num_inputs)+1);
+    num_hidden.push_back(2*max(num_outputs,num_inputs)+1);
+    int num_elems = robot->num_elems;
+    long num_ann_iters = 100000;
+    std::vector<long> nodes;
+    nodes.push_back(num_inputs); // inputs
+    for(int h=0;h<num_hidden.size();h++)
+      nodes.push_back(num_hidden[h]); // hidden layer
+    nodes.push_back(num_outputs); // output layer
+    nodes.push_back(num_outputs); // outputs
+    perceptron = new Perceptron<double>(nodes);
+    perceptron->epsilon = 1e-5;
+    perceptron->alpha = 1e-2;
+    perceptron->sigmoid_type = 0;
+    perceptron->train(perceptron->sigmoid_type,perceptron->epsilon,num_ann_iters,num_elems,num_inputs,in_dump,num_outputs,out_dump);
+}
 
+bool training = false;
 void keyboard(unsigned char key,int x,int y)
 {
   switch(key)
   {
+    case '\'':if(perceptron->quasi_newton!=NULL){perceptron->quasi_newton->quasi_newton_update=!perceptron->quasi_newton->quasi_newton_update;}break;
+    case ';':perceptron->sigmoid_type = (perceptron->sigmoid_type+1)%2;break;
+    case '3':perceptron->epsilon /= 1.1;break;
+    case '4':perceptron->epsilon *= 1.1;break;
+    case '1':sample_index--;if(sample_index<0)sample_index=0;break;
+    case '2':sample_index++;if(sample_index>=robot->get_output_size(learning_range))sample_index=robot->get_output_size(learning_range)-1;break;
+    case 'r':perceptron->alpha *= 1.1;perceptron->quasi_newton->alpha = perceptron->alpha; break;
+    case 'f':perceptron->alpha /= 1.1;perceptron->quasi_newton->alpha = perceptron->alpha; break;
+    case 'p':
+      {
+        if(training==false)
+        {
+          training=true;
+          /*
+          mrbm_params params(robot,learning_range,learning_samples-1,learning_samples,.5);
+          boost::thread * thr ( new boost::thread ( run_mrbm
+                                                  , params
+                                                  , in_dump
+                                                  , out_dump
+                                                  , prd_dump
+                                                  ) 
+                              );
+          */
+          boost::thread * thr ( new boost::thread ( run_perceptron ) );
+        }
+        break;
+      }
+      break;
+    case 'k':learning_selection++;if(learning_selection>=learning_samples)learning_selection=learning_samples-1;else err_stats_changed=true;break;
+    case 'j':learning_selection--;if(learning_selection<0)learning_selection=0;else err_stats_changed=true;break;
+    case 'm': // chage draw mode
+      draw_mode = (draw_mode+1)%2;
+      break;
     case 'y': // buy
       if(game_mode&&user){
         user->buyAll(stock_index,end_date_index);
@@ -1865,6 +4272,8 @@ void keyboard(unsigned char key,int x,int y)
       game_mode = !game_mode;
       if(game_mode) 
       {
+        start_date_index = 3000 - (rand()%1000);
+        end_date_index = start_date_index - 100;
         if(rsymbols.size()==0)
         {
           game_mode=false;
@@ -1881,9 +4290,14 @@ void keyboard(unsigned char key,int x,int y)
           }
         }
       }
+      else
+      {
+        start_date_index = 4000;
+        end_date_index = 0;
+      }
       break;
-    case 'w':view_fraction *= 1.1f;if(view_fraction>1.0f)view_fraction=1.0f;break;
-    case 's':view_fraction /= 1.1f;break;
+    case 'w':if(!game_mode){end_date_index=0;start_date_index*=1.1f;if(start_date_index>4000)start_date_index=4000;}break;
+    case 's':if(!game_mode){end_date_index=0;start_date_index/=1.1f;if(start_date_index<10)start_date_index=10;}break;
     case 'c':pick_start_index = true;break;
     case 'v':pick_end_index = true;break;
     case 'b':start_index=-1;end_index=-1;break;
@@ -1931,8 +4345,12 @@ int main(int argc,char ** argv)
   seed = time(0);
   srand(seed);
 
-  start_date_index = 3000 - (rand()%1000);
-    end_date_index = start_date_index - 100;
+  bool awesome_macd = true;
+
+  int synthetic_prices = (learning_range-1)*learning_offset;
+
+  start_date_index = 4000;
+  end_date_index = 0;
   
   // list all files in current directory.
   boost::filesystem::path p ("data");
@@ -1948,13 +4366,13 @@ int main(int argc,char ** argv)
       std::string current_file = itr->path().string();
       symbols.push_back(current_file);
       fprintf(stderr,"file:%s\n",current_file.c_str());
-      read_data_yahoo(current_file,prices[ind]);
+      read_data_yahoo(current_file,prices[ind],synthetic_prices);
     }
   }
 
   for(int i=0;i<prices.size();i++)
   {
-    price::initialize_indicators(prices[i]);
+    price::initialize_indicators(prices[i],awesome_macd);
   }
 
   scanner.scan(prices,symbols);
@@ -1979,6 +4397,13 @@ int main(int argc,char ** argv)
   std::cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$" << std::endl;
 
   user = new User("Anton Kodochygov",10000,rsymbols);
+
+   in_dump = new double[learning_num*prices.size()*robot-> get_input_size(learning_range)];
+  out_dump = new double[learning_num*prices.size()*robot->get_output_size(learning_range)];
+  prd_dump = new double[learning_num*prices.size()*robot->get_output_size(learning_range)];
+
+  learning_samples = construct_learning_data(learning_num,learning_range,learning_offset,in_dump,out_dump);
+  std::cout << "learning samples: " << learning_samples << std::endl;
 
   glutInit(&argc, argv);
   glutInitWindowSize(width,height);

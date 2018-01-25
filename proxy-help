@@ -1,0 +1,3 @@
+~/.curlrc
+proxy = prxy784932743.microsof.com:80
+proxy-user = user:password

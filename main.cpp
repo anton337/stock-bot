@@ -35,11 +35,23 @@ T dsigmoid1(T x)
 template < typename T >
 T sigmoid2(T x)
 {
-    return log(1+exp(1.00*x));
+    return atan(x);
 }
 
 template < typename T >
 T dsigmoid2(T x)
+{
+    return 1.00/(1+x*x);
+}
+
+template < typename T >
+T sigmoid3(T x)
+{
+    return log(1+exp(1.00*x));
+}
+
+template < typename T >
+T dsigmoid3(T x)
 {
     return 1.00/(1+exp(-1.00*x));
 }
@@ -53,6 +65,8 @@ T sigmoid(T x,int type)
             return sigmoid1(x);
         case 1:
             return sigmoid2(x);
+        case 2:
+            return sigmoid3(x);
     }
 }
 
@@ -749,7 +763,11 @@ void training_worker(training_info<T> * g,std::vector<long> const & vrtx,T * var
 
 }
 
+bool stop_training = false;
+bool continue_training = true;
+
 std::vector<double> errs;
+std::vector<double> test_errs;
 
 template<typename T>
 struct Perceptron
@@ -763,6 +781,7 @@ struct Perceptron
     T **  weights_bias;
     T **  activation_values;
     T **  activation_values1;
+    T **  activation_values2;
     T **  deltas;
 
     long n_inputs;
@@ -770,10 +789,59 @@ struct Perceptron
     long n_layers;
     std::vector<long> n_nodes;
 
-    void dump_to_file(std::string filename)
+    T get_variable(int ind)
     {
-        std::cout << "dump to file:" << filename << std::endl;
-        fstream myfile (filename.c_str());
+        int I = 0;
+          for(int layer = 0;layer < n_layers;layer++)
+          {
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+              if(I==ind)return weights_bias[layer][i];
+              I++;
+            }
+          }
+          for(int layer = 0;layer < n_layers;layer++)
+          {
+            for(int i=0;i<n_nodes[layer+1];i++)
+            {
+                for(int j=0;j<n_nodes[layer];j++)
+                {
+                    if(I==ind)return weights_neuron[layer][i][j];
+                    I++;
+                }
+            }
+          }
+        return 0;
+    }
+
+    int get_num_variables()
+    {
+        int I = 0;
+          for(int layer = 0;layer < n_layers;layer++)
+          {
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+              I++;
+            }
+          }
+          for(int layer = 0;layer < n_layers;layer++)
+          {
+            for(int i=0;i<n_nodes[layer+1];i++)
+            {
+                for(int j=0;j<n_nodes[layer];j++)
+                {
+                    I++;
+                }
+            }
+          }
+        return I;
+    }
+
+    void dump_to_file(std::string filename,bool quiet=false)
+    {
+        if(!quiet)
+          std::cout << "dump to file:" << filename << std::endl;
+        ofstream myfile (filename.c_str());
         if (myfile.is_open())
         {
           myfile << "#n_nodes" << std::endl;
@@ -805,6 +873,8 @@ struct Perceptron
             }
           }
           myfile << std::endl;
+          myfile << "#error" << std::endl;
+          myfile << final_error << std::endl;
           myfile.close();
         }
         else
@@ -815,9 +885,10 @@ struct Perceptron
 
     }
 
-    void load_from_file(std::string filename)
+    void load_from_file(std::string filename,bool quiet=false)
     {
-        std::cout << "loading from file:" << filename << std::endl;
+        if(!quiet)
+          std::cout << "loading from file:" << filename << std::endl;
         ifstream myfile (filename.c_str());
         if (myfile.is_open())
         {
@@ -867,7 +938,6 @@ struct Perceptron
                     ss >> tmp;
                     weights_bias[layer][i] = atof(tmp.c_str());
                   }
-                  std::cout << " ";
                 }
                 stage = 2;
                 break;
@@ -888,6 +958,15 @@ struct Perceptron
                   }
                 }
                 stage = 3;
+                break;
+              }
+              case 3: // final error
+              {
+                std::stringstream ss;
+                ss << line;
+                ss >> tmp;
+                final_error = atof(tmp.c_str());
+                stage = 4;
                 break;
               }
               default:done = true;break;
@@ -928,12 +1007,14 @@ struct Perceptron
         weights_bias = new T*[n_layers];
         activation_values  = new T*[n_nodes.size()];
         activation_values1 = new T*[n_nodes.size()];
+        activation_values2 = new T*[n_nodes.size()];
         deltas = new T*[n_nodes.size()];
         
         for(long layer = 0;layer < n_nodes.size();layer++)
         {
             activation_values [layer] = new T[n_nodes[layer]];
             activation_values1[layer] = new T[n_nodes[layer]];
+            activation_values2[layer] = new T[n_nodes[layer]];
             deltas[layer] = new T[n_nodes[layer]];
         }
 
@@ -945,13 +1026,13 @@ struct Perceptron
                 weights_neuron[layer][i] = new T[n_nodes[layer]];
                 for(long j=0;j<n_nodes[layer];j++)
                 {
-                    weights_neuron[layer][i][j] = -1.0 + 2.0 * ((rand()%10000)/10000.0);
+                    weights_neuron[layer][i][j] = 10.0 * (-1.0 + 2.0 * ((rand()%10000)/10000.0));
                 }
             }
             weights_bias[layer] = new T[n_nodes[layer+1]];
             for(long i=0;i<n_nodes[layer+1];i++)
             {
-                weights_bias[layer][i] = -1.0 + 2.0 * ((rand()%10000)/10000.0);
+                weights_bias[layer][i] = 10.0 * (-1.0 + 2.0 * ((rand()%10000)/10000.0));
             }
         }
 
@@ -998,28 +1079,97 @@ struct Perceptron
         return labels;
     }
 
+    T verify( long n_test_elements
+            , long n_variables
+            , T * test_variables
+            , long n_labels
+            , T * test_labels
+            )
+    {
+        T err = 0;
+
+        T * labels = new T[n_labels];
+
+        for(int e=0;e<n_test_elements;e++)
+        {
+
+          // initialize input activations
+          for(long i=0;i<n_variables;i++)
+          {
+              activation_values2[0][i] = test_variables[e*n_variables+i];
+          }
+          // forward propagation
+          for(long layer = 0; layer < n_layers; layer++)
+          {
+              for(long i=0;i<n_nodes[layer+1];i++)
+              {
+                  T sum = weights_bias[layer][i];
+                  for(long j=0;j<n_nodes[layer];j++)
+                  {
+                      sum += activation_values2[layer][j] * weights_neuron[layer][i][j];
+                  }
+                  activation_values2[layer+1][i] = sigmoid(sum,0);// <- zero is important here!!!!
+              }
+          }
+          long last_layer = n_nodes.size()-2;
+          for(long i=0;i<n_labels;i++)
+          {
+            if(i==sample_index)
+            {
+              err += fabs(test_labels[e*n_labels+i] - activation_values2[last_layer][i]);
+            }
+          }
+
+        }
+
+        delete [] labels;
+
+        return err/n_test_elements;
+
+    }
+
     int get_sigmoid()
     {
         return sigmoid_type;
     }
 
-    void train(int p_sigmoid_type,T p_epsilon,long n_iterations,long n_elements,long n_variables,T * variables,long n_labels, T * labels)
+    void train ( int p_sigmoid_type
+               , T p_epsilon
+               , long n_iterations
+               , long n_elements
+               , long n_test_elements
+               , long n_variables
+               , T * variables
+               , T * test_variables
+               , long n_labels
+               , T * labels
+               , T * test_labels
+               , quasi_newton_info<T> * q_newton = NULL
+               )
     {
         sigmoid_type = p_sigmoid_type;
         epsilon = p_epsilon;
         if(n_variables != n_nodes[0]){std::cout << "error 789437248932748293" << std::endl;exit(0);}
-        quasi_newton = new quasi_newton_info<T>();
-        quasi_newton->alpha = alpha;
-        quasi_newton->n_nodes = n_nodes;
-        quasi_newton->n_layers = n_layers;
-        quasi_newton->weights_neuron = weights_neuron;
-        quasi_newton->weights_bias = weights_bias;
-        quasi_newton->init_QuasiNewton();
-        quasi_newton->quasi_newton_update = false;
+        if(q_newton == NULL)
+        {
+            quasi_newton = new quasi_newton_info<T>();
+            quasi_newton->alpha = alpha;
+            quasi_newton->n_nodes = n_nodes;
+            quasi_newton->n_layers = n_layers;
+            quasi_newton->weights_neuron = weights_neuron;
+            quasi_newton->weights_bias = weights_bias;
+            quasi_newton->init_QuasiNewton();
+            quasi_newton->quasi_newton_update = true;
+        }
+        else
+        {
+            quasi_newton = q_newton;
+        }
         ierror = 1e10;
         bool init = true;
         perror = 1e10;
-        for(long iter = 0; iter < n_iterations; iter++)
+        T min_final_error = 1e10;
+        for(long iter = 0; iter < n_iterations || continue_training; iter++)
         {
             T error = 0;
             T index = 0;
@@ -1076,17 +1226,37 @@ struct Perceptron
             threads.clear();
             vrtx.clear();
             g.clear();
-
+            final_error = verify(n_test_elements,n_variables,test_variables,n_labels,test_labels);
             static int cnt1 = 0;
             if(cnt1%100==0)
-            std::cout << iter << "\tquasi_newton_update=" << quasi_newton->quasi_newton_update << "\ttype=" << sigmoid_type << "\tepsilon=" << epsilon << "\talpha=" << alpha << '\t' << "error=" << error << "\tdiff=" << (error-perror) << "\t\%error=" << 100*error/n_elements << "\tindex=" << index/n_elements << std::endl;
+            std::cout << iter << "\tquasi_newton_update=" << quasi_newton->quasi_newton_update << "\ttype=" << sigmoid_type << "\tepsilon=" << epsilon << "\talpha=" << alpha << '\t' << "error=" << error << "\tdiff=" << (error-perror) << "\t\%error=" << 100*error/n_elements << "\ttest\%error=" << 100*final_error << "\tindex=" << index/n_elements << std::endl;
             cnt1++;
             perror = error;
             errs.push_back(error/n_elements);
+            test_errs.push_back(final_error);
             if(init)
             {
                 ierror = error;
                 init = false;
+            }
+
+            if((iter+1)%100000==0||stop_training)
+            {
+                std::stringstream ss;
+                ss << "snapshots/network.ann." << ((int)(100*10000*final_error)/10000.0f);
+                dump_to_file(ss.str());
+            }
+
+            if(stop_training){stop_training=false;break;}
+
+            // MARK!!!
+            if(error/n_elements < 0.1 && iter > n_iterations)
+            {
+              std::stringstream ss;
+              ss << "snapshots/network.ann." << ((int)(100*10000*final_error)/10000.0f);
+              dump_to_file(ss.str());
+              dump_to_file("network.ann");
+              exit(1);
             }
 
             //char ch;
@@ -1094,6 +1264,8 @@ struct Perceptron
 
         }
     }
+
+    T final_error;
 
 };
 
@@ -3472,17 +3644,17 @@ struct Robot
     {
       std::cout << symb << ":";
       std::cout << p.date << ":";
+      for(int i=0;i<output.size();i++)
+      {
+        std::cout << ((output[i]>0.5)?"1":"0");
+        out_dump[out_off+i] = ((output[i]));
+      }
+      std::cout << ":";
       for(int i=0;i<input.size();i++)
       {
         if(i%num_bits==0&&i>0)std::cout << "|";
         std::cout << ((input[i]>0.5)?"1":"0");
         in_dump[in_off+i] = ((input[i]));
-      }
-      std::cout << ":";
-      for(int i=0;i<output.size();i++)
-      {
-        std::cout << ((output[i]>0.5)?"1":"0");
-        out_dump[out_off+i] = ((output[i]));
       }
       std::cout << std::endl;
       in_off += in_size;
@@ -3603,16 +3775,20 @@ void drawString (void * font, char const *s, double x, double y, double z)
 User * user = NULL;
 
 long learning_samples = 0;
-int input_learning_range = 26;
+long test_learning_samples = 0;
+int input_learning_range = 5;
 int output_learning_range = 2;
-int synthetic_range = 20;
+int synthetic_range = 60;
 int learning_offset = 1;
-int learning_num = 3000;
+int learning_num = 600;
+int test_learning_num = 100;
 double *  in_dump = NULL;
 double * out_dump = NULL;
-double * prd_dump = NULL;
+double *  in_test = NULL;
+double * out_test = NULL;
 
 Perceptron<double> * perceptron = NULL;
+Perceptron<double> * perceptron_tmp = NULL;
 
 void reconstruct(std::vector<price> & prices,int index)
 {
@@ -4035,7 +4211,7 @@ void draw_charts()
 
 }
 
-long construct_learning_data(int num,int offset,double * in_dump,double * out_dump)
+long construct_learning_data(int start,int num,int offset,double * in_dump,double * out_dump)
 {
   std::cout << "construct learning data" << std::endl;
   long in_off = 0;
@@ -4048,7 +4224,7 @@ long construct_learning_data(int num,int offset,double * in_dump,double * out_du
     if(prices[stock_index].size()>num-offset*synthetic_range)
     {
       long size = prices[stock_index].size()-1;
-      for(long ind=input_learning_range*offset;ind<num;ind++)
+      for(long ind=(start+input_learning_range)*offset;ind<num;ind++)
       {
         bool go = true;
         std::vector<price> prev_prcs;
@@ -4091,6 +4267,120 @@ long learning_selection = 0;
 double * err_stats = NULL;
 bool err_stats_changed = false;
 long err_stats_cnt = 1;
+
+double * min_variable = NULL;
+double * max_variable = NULL;
+
+int x_dim = 0;
+int y_dim = 1;
+
+void init_energy()
+{
+
+  if(perceptron != NULL)
+  {
+    min_variable = new double[perceptron->get_num_variables()];
+    max_variable = new double[perceptron->get_num_variables()];
+    for(int i=0;i<perceptron->get_num_variables();i++)
+    {
+        min_variable[i] = -20;
+        max_variable[i] =  20;
+    }
+  }
+
+}
+
+void draw_energy()
+{
+
+  if(  perceptron != NULL 
+    && x_dim >= 0 
+    && x_dim < perceptron->get_num_variables() 
+    && y_dim >= 0 
+    && y_dim < perceptron->get_num_variables() 
+    )
+  {
+    static bool init_eng = true;
+    if(init_eng)
+    {
+        init_eng = false;
+        init_energy();
+    }
+    glColor3f(1,1,1);
+    std::stringstream ss0,ss1,ss2,ss3;
+    ss0 << ((int)(100*min_variable[x_dim])/100.0f);
+    if(!game_mode)drawString(GLUT_BITMAP_HELVETICA_18,ss0.str().c_str(),-0.9,-0.8,0);
+    ss1 << ((int)(100*max_variable[x_dim])/100.0f);
+    if(!game_mode)drawString(GLUT_BITMAP_HELVETICA_18,ss1.str().c_str(),-0.9, 0.8,0);
+    ss2 << ((int)(100*min_variable[y_dim])/100.0f);
+    if(!game_mode)drawString(GLUT_BITMAP_HELVETICA_18,ss2.str().c_str(),-0.8,-0.9,0);
+    ss3 << ((int)(100*max_variable[y_dim])/100.0f);
+    if(!game_mode)drawString(GLUT_BITMAP_HELVETICA_18,ss3.str().c_str(), 0.8,-0.9,0);
+    glColor3f(1-perceptron->final_error,1-perceptron->final_error,1-perceptron->final_error);
+    glBegin(GL_QUADS);
+    glVertex3f(
+        -1 + 2*(perceptron->get_variable(x_dim)-min_variable[x_dim])/(max_variable[x_dim]-min_variable[x_dim]) - 0.005 ,
+        -1 + 2*(perceptron->get_variable(y_dim)-min_variable[y_dim])/(max_variable[y_dim]-min_variable[y_dim]) - 0.005 ,
+        0
+    );
+    glVertex3f(
+        -1 + 2*(perceptron->get_variable(x_dim)-min_variable[x_dim])/(max_variable[x_dim]-min_variable[x_dim]) - 0.005 ,
+        -1 + 2*(perceptron->get_variable(y_dim)-min_variable[y_dim])/(max_variable[y_dim]-min_variable[y_dim]) + 0.005 ,
+        0
+    );
+    glVertex3f(
+        -1 + 2*(perceptron->get_variable(x_dim)-min_variable[x_dim])/(max_variable[x_dim]-min_variable[x_dim]) + 0.005 ,
+        -1 + 2*(perceptron->get_variable(y_dim)-min_variable[y_dim])/(max_variable[y_dim]-min_variable[y_dim]) + 0.005 ,
+        0
+    );
+    glVertex3f(
+        -1 + 2*(perceptron->get_variable(x_dim)-min_variable[x_dim])/(max_variable[x_dim]-min_variable[x_dim]) + 0.005 ,
+        -1 + 2*(perceptron->get_variable(y_dim)-min_variable[y_dim])/(max_variable[y_dim]-min_variable[y_dim]) - 0.005 ,
+        0
+    );
+    glEnd();
+    
+    // list all files in current directory.
+    boost::filesystem::path p ("snapshots");
+    boost::filesystem::directory_iterator end_itr;
+    // cycle through the directory
+    for (boost::filesystem::directory_iterator itr(p); itr != end_itr; ++itr)
+    {
+      // If it's not a directory, list it. If you want to list directories too, just remove this check.
+      if (boost::filesystem::is_regular_file(itr->path())) {
+        std::string current_file = itr->path().string();
+        perceptron_tmp -> load_from_file(current_file,true);
+        glColor3f(1-perceptron_tmp->final_error,1-perceptron_tmp->final_error,1-perceptron_tmp->final_error);
+        glBegin(GL_QUADS);
+        glVertex3f(
+            -1 + 2*(perceptron_tmp->get_variable(x_dim)-min_variable[x_dim])/(max_variable[x_dim]-min_variable[x_dim]) - 0.005 ,
+            -1 + 2*(perceptron_tmp->get_variable(y_dim)-min_variable[y_dim])/(max_variable[y_dim]-min_variable[y_dim]) - 0.005 ,
+            0
+        );
+        glVertex3f(
+            -1 + 2*(perceptron_tmp->get_variable(x_dim)-min_variable[x_dim])/(max_variable[x_dim]-min_variable[x_dim]) - 0.005 ,
+            -1 + 2*(perceptron_tmp->get_variable(y_dim)-min_variable[y_dim])/(max_variable[y_dim]-min_variable[y_dim]) + 0.005 ,
+            0
+        );
+        glVertex3f(
+            -1 + 2*(perceptron_tmp->get_variable(x_dim)-min_variable[x_dim])/(max_variable[x_dim]-min_variable[x_dim]) + 0.005 ,
+            -1 + 2*(perceptron_tmp->get_variable(y_dim)-min_variable[y_dim])/(max_variable[y_dim]-min_variable[y_dim]) + 0.005 ,
+            0
+        );
+        glVertex3f(
+            -1 + 2*(perceptron_tmp->get_variable(x_dim)-min_variable[x_dim])/(max_variable[x_dim]-min_variable[x_dim]) + 0.005 ,
+            -1 + 2*(perceptron_tmp->get_variable(y_dim)-min_variable[y_dim])/(max_variable[y_dim]-min_variable[y_dim]) - 0.005 ,
+            0
+        );
+        glEnd();
+      }
+    }
+
+    usleep(1000);
+
+  }
+
+}
 
 void draw_learning_progress()
 {
@@ -4247,10 +4537,10 @@ void draw_learning_progress()
       {
         if(max_err<errs[k])max_err=errs[k];
       }
-      glColor3f(1,1,1);
       glBegin(GL_LINES);
       for(long k=0;k+1<errs.size();k++)
       {
+        glColor3f(1,1,1);
         glVertex3f( -1 + 2*k / ((double)errs.size()-1)
                   , errs[k] / max_err
                   , 0
@@ -4267,20 +4557,21 @@ void draw_learning_progress()
                   , 0
                   , 0
                   );
+        glColor3f(1,1,0);
+        glVertex3f( -1 + 2*k / ((double)errs.size()-1)
+                  , test_errs[k] / max_err
+                  , 0
+                  );
+        glVertex3f( -1 + 2*(k+1) / ((double)errs.size()-1)
+                  , test_errs[k+1] / max_err
+                  , 0
+                  );
         glVertex3f( -1 + 2*k / ((double)errs.size()-1)
                   , 0
                   , 0
                   );
-        glVertex3f( -1 + 2*k / ((double)errs.size()-1)
-                  , errs[k] / max_err
-                  , 0
-                  );
         glVertex3f( -1 + 2*(k+1) / ((double)errs.size()-1)
                   , 0
-                  , 0
-                  );
-        glVertex3f( -1 + 2*(k+1) / ((double)errs.size()-1)
-                  , errs[k+1] / max_err
                   , 0
                   );
       }
@@ -4300,8 +4591,14 @@ void display()
     draw_charts();
   }
   else
+  if(draw_mode == 1)
   {
     draw_learning_progress();
+  }
+  else
+  if(draw_mode == 2)
+  {
+    draw_energy();
   }
   glutSwapBuffers();
 }
@@ -4337,14 +4634,16 @@ void init()
   glBlendEquation(GL_FUNC_ADD);
 }
 
+std::string input_filename = "";
+
 void run_perceptron()
 {
+    std::cout << "learning samples: " << learning_samples << "\t" << test_learning_samples << std::endl;
     int  num_inputs = robot-> get_input_size(input_learning_range);
     int num_outputs = robot->get_output_size(output_learning_range);
     std::vector<int> num_hidden;
-    num_hidden.push_back(2*maxi(num_outputs,num_inputs)+1);
-    num_hidden.push_back(2*maxi(num_outputs,num_inputs)+1);
-    int num_elems = robot->num_elems;
+    num_hidden.push_back(21);
+    num_hidden.push_back(21);
     long num_ann_iters = 100000;
     std::vector<long> nodes;
     nodes.push_back(num_inputs); // inputs
@@ -4352,11 +4651,32 @@ void run_perceptron()
       nodes.push_back(num_hidden[h]); // hidden layer
     nodes.push_back(num_outputs); // output layer
     nodes.push_back(num_outputs); // outputs
-    perceptron = new Perceptron<double>(nodes);
-    perceptron->epsilon = 1e-5;
-    perceptron->alpha = 1e-2;
-    perceptron->sigmoid_type = 0;
-    perceptron->train(perceptron->sigmoid_type,perceptron->epsilon,num_ann_iters,num_elems,num_inputs,in_dump,num_outputs,out_dump);
+    int n_prptn = 1000;
+    perceptron_tmp = new Perceptron<double>(nodes);
+    Perceptron<double> ** p = new Perceptron<double>*[n_prptn];
+    double min_err = 1e10;
+    double tmp_err;
+    int min_ind = 0;
+    for(int i=0;i<n_prptn;i++)
+    {
+        p[i] = new Perceptron<double>(nodes);
+        p[i]->epsilon = 1e-5;
+        p[i]->alpha = 1;
+        p[i]->sigmoid_type = 1;
+        if(input_filename.size()>0)
+        {
+          p[i]->load_from_file(input_filename);
+        }
+        perceptron = p[i];
+        p[i]->train(p[i]->sigmoid_type,p[i]->epsilon,1000,learning_samples,test_learning_samples,num_inputs,in_dump,in_test,num_outputs,out_dump,out_test,(i==0)?NULL:p[0]->quasi_newton);
+        if(p[i]->final_error<min_err)
+        {
+            min_err = p[i]->final_error;
+            min_ind = i;
+        }
+    }
+    perceptron = p[min_ind];
+    perceptron->train(perceptron->sigmoid_type,perceptron->epsilon,num_ann_iters,learning_samples,test_learning_samples,num_inputs,in_dump,in_test,num_outputs,out_dump,out_test,p[0]->quasi_newton);
 }
 
 bool training = false;
@@ -4364,7 +4684,13 @@ void keyboard(unsigned char key,int x,int y)
 {
   switch(key)
   {
-    case '9':perceptron->dump_to_file("network.ann");break;
+    case '5':continue_training=!continue_training;std::cout << "continue training:" << continue_training << std::endl;break;
+    case '6':stop_training=!stop_training;std::cout << "stop training:" << stop_training << std::endl;break;
+    case '-':x_dim--;std::cout << x_dim << "\t" << y_dim << '\t' << perceptron->get_num_variables() << std::endl;break;
+    case '=':x_dim++;std::cout << x_dim << "\t" << y_dim << '\t' << perceptron->get_num_variables() << std::endl;break;
+    case '[':y_dim--;std::cout << x_dim << "\t" << y_dim << '\t' << perceptron->get_num_variables() << std::endl;break;
+    case ']':y_dim++;std::cout << x_dim << "\t" << y_dim << '\t' << perceptron->get_num_variables() << std::endl;break;
+    case '9':perceptron->dump_to_file("network.ann.new");break;
     case '0':perceptron->load_from_file("network.ann");break;
     case '\'':if(perceptron->quasi_newton!=NULL){perceptron->quasi_newton->quasi_newton_update=!perceptron->quasi_newton->quasi_newton_update;}break;
     case ';':perceptron->sigmoid_type = (perceptron->sigmoid_type+1)%2;break;
@@ -4397,7 +4723,7 @@ void keyboard(unsigned char key,int x,int y)
     case 'k':learning_selection++;if(learning_selection>=learning_samples)learning_selection=learning_samples-1;else err_stats_changed=true;break;
     case 'j':learning_selection--;if(learning_selection<0)learning_selection=0;else err_stats_changed=true;break;
     case 'm': // chage draw mode
-      draw_mode = (draw_mode+1)%2;
+      draw_mode = (draw_mode+1)%3;
       break;
     case 'y': // buy
       if(game_mode&&user){
@@ -4577,6 +4903,17 @@ void active_mouse(int x,int y)
 
 int main(int argc,char ** argv)
 {
+
+  if(argc>=2)
+  {
+    learning_num = atoi(argv[1]);
+  }
+
+  if(argc>=3)
+  {
+    input_filename = std::string(argv[2]);
+  }
+
   int seed;
   seed = time(0);
   srand(seed);
@@ -4634,12 +4971,22 @@ int main(int argc,char ** argv)
 
   user = new User("Anton Kodochygov",10000,rsymbols);
 
-   in_dump = new double[learning_num*prices.size()*robot-> get_input_size(input_learning_range)];
+   in_dump = new double[learning_num*prices.size()*robot-> get_input_size( input_learning_range)];
   out_dump = new double[learning_num*prices.size()*robot->get_output_size(output_learning_range)];
-  prd_dump = new double[learning_num*prices.size()*robot->get_output_size(output_learning_range)];
+   in_test = new double[test_learning_num*prices.size()*robot-> get_input_size( input_learning_range)];
+  out_test = new double[test_learning_num*prices.size()*robot->get_output_size(output_learning_range)];
 
-  learning_samples = construct_learning_data(learning_num,learning_offset,in_dump,out_dump);
+  learning_samples = construct_learning_data(40+test_learning_num,40+test_learning_num+learning_num,learning_offset,in_dump,out_dump);
+  test_learning_samples = construct_learning_data(0,test_learning_num,learning_offset,in_test,out_test);
   std::cout << "learning samples: " << learning_samples << std::endl;
+
+  {
+    if(training==false)
+    {
+      training=true;
+      boost::thread * thr ( new boost::thread ( run_perceptron ) );
+    }
+  }
 
   glutInit(&argc, argv);
   glutInitWindowSize(width,height);

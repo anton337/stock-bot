@@ -4630,9 +4630,10 @@ void evaluate_prediction()
         int out_size = robot->get_output_size(output_learning_range);
         for(int stock=0;stock<prices.size();stock++)
         {
+            double err_prct = 0;
             for(int index=0;index<prices[stock].size();index++)
             {
-                std::cout << symbols[stock] << '\t' << index << std::endl;
+                //std::cout << symbols[stock] << '\t' << index << std::endl;
                 double * in = new double[in_size];
                 bool go = true;
                 for(int i=index+1,k=0;k<input_learning_range;i-=learning_offset,k++)
@@ -4689,7 +4690,9 @@ void evaluate_prediction()
                 }
                 delete [] in;
                 in = NULL;
+                err_prct += prices[stock][index+1].prediction_confidence;
             }
+            std::cout << "Rate:" << err_prct / prices[stock].size() << std::endl;
         }
         std::cout << "Done" << std::endl;
     }
@@ -4901,7 +4904,7 @@ void draw_learning_progress()
               {
                 tmp_in[i] = in[i];
               }
-              tmp_in[0] = T;
+              tmp_in[0] = 0.5;
               for(int iter=0;iter<1000;iter++)
               {
                 double * dat = perceptron->model(in_size,out_size,&tmp_in[0]);

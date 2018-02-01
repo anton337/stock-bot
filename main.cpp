@@ -18,7 +18,13 @@
 
 using namespace std;
 
+double delta_D = 0.05;
+
 int sample_index = 0;
+
+int train_index = 0;
+
+float damp_weight = 0.1;
 
 template < typename T >
 T sigmoid1(T x)
@@ -33,25 +39,25 @@ T dsigmoid1(T x)
 }
 
 template < typename T >
-T sigmoid2(T x)
+T sigmoid3(T x)
 {
     return atan(x);
 }
 
 template < typename T >
-T dsigmoid2(T x)
+T dsigmoid3(T x)
 {
     return 1.00/(1+x*x);
 }
 
 template < typename T >
-T sigmoid3(T x)
+T sigmoid2(T x)
 {
     return log(1+exp(1.00*x));
 }
 
 template < typename T >
-T dsigmoid3(T x)
+T dsigmoid2(T x)
 {
     return 1.00/(1+exp(-1.00*x));
 }
@@ -79,6 +85,8 @@ T dsigmoid(T x,int type)
             return dsigmoid1(x);
         case 1:
             return dsigmoid2(x);
+        case 2:
+            return dsigmoid3(x);
     }
 }
 
@@ -680,6 +688,8 @@ void training_worker(training_info<T> * g,std::vector<long> const & vrtx,T * var
         for(long i=0;i<g->n_nodes[0];i++)
         {
             g->activation_values[0][i] = variables[vrtx[n]*g->n_variables+i];
+            // HUUUGGGGEEEE  MARK !!!!!!!!!!!!!!!!!!
+            if(i==0)g->activation_values[0][i] = 0.5;
         }
         // forward propagation
         for(long layer = 0; layer < g->n_layers; layer++)
@@ -698,17 +708,45 @@ void training_worker(training_info<T> * g,std::vector<long> const & vrtx,T * var
         }
         long last_layer = g->n_nodes.size()-2;
         // initialize observed labels
-        T min_partial_error = 1e10;
+        T max_err = 0;
+        T min_err = 1e12;
+        T tmp_err;
+        T min_partial_error = 0;
         T ind = 0;
         for(long i=0;i<g->n_nodes[last_layer];i++)
         {
-            g->deltas[last_layer+1][i] = labels[vrtx[n]*g->n_labels+i] - g->activation_values[last_layer][i];
-            //g->partial_error += fabs(g->deltas[last_layer+1][i]);
-            if(i==sample_index)
-            if(fabs(g->deltas[last_layer+1][i]<min_partial_error))
+            tmp_err = fabs(g->deltas[last_layer+1][i] = labels[vrtx[n]*g->n_labels+i] - g->activation_values[last_layer][i]);
+            if(tmp_err>max_err)
             {
-                min_partial_error = fabs(g->deltas[last_layer+1][i]);
+                max_err = tmp_err;
+            }
+            if(tmp_err<min_err)
+            {
+                min_err = tmp_err;
                 ind = i;
+            }
+        }
+        // MARK !!!!!!!!!!!!!!!!!!
+        train_index = 0;
+        for(long i=0;i<g->n_nodes[last_layer];i++)
+        {
+            //g->partial_error += fabs(g->deltas[last_layer+1][i]);
+            //if(i==sample_index)
+            //if(fabs(g->deltas[last_layer+1][i]<min_partial_error))
+            //{
+            //    min_partial_error = fabs(g->deltas[last_layer+1][i]);
+            //    ind = i;
+            //}
+            g->deltas[last_layer+1][i] = 0;
+            if(i==train_index)
+            {
+                g->deltas[last_layer+1][i] = labels[vrtx[n]*g->n_labels+i] - g->activation_values[last_layer][i];
+                min_partial_error += fabs(g->deltas[last_layer+1][i]);
+            }
+            else
+            {
+                g->deltas[last_layer+1][i] = 0;//damp_weight*(labels[vrtx[n]*g->n_labels+i] - g->activation_values[last_layer][i]);
+                //min_partial_error += fabs(g->deltas[last_layer+1][i]);
             }
             //std::cout << g->deltas[last_layer+1][i] << '\t';
         }
@@ -782,6 +820,7 @@ struct Perceptron
     T **  activation_values;
     T **  activation_values1;
     T **  activation_values2;
+    T **  activation_values3;
     T **  deltas;
 
     long n_inputs;
@@ -1008,6 +1047,7 @@ struct Perceptron
         activation_values  = new T*[n_nodes.size()];
         activation_values1 = new T*[n_nodes.size()];
         activation_values2 = new T*[n_nodes.size()];
+        activation_values3 = new T*[n_nodes.size()];
         deltas = new T*[n_nodes.size()];
         
         for(long layer = 0;layer < n_nodes.size();layer++)
@@ -1015,6 +1055,7 @@ struct Perceptron
             activation_values [layer] = new T[n_nodes[layer]];
             activation_values1[layer] = new T[n_nodes[layer]];
             activation_values2[layer] = new T[n_nodes[layer]];
+            activation_values3[layer] = new T[n_nodes[layer]];
             deltas[layer] = new T[n_nodes[layer]];
         }
 
@@ -1026,13 +1067,13 @@ struct Perceptron
                 weights_neuron[layer][i] = new T[n_nodes[layer]];
                 for(long j=0;j<n_nodes[layer];j++)
                 {
-                    weights_neuron[layer][i][j] = 10.0 * (-1.0 + 2.0 * ((rand()%10000)/10000.0));
+                    weights_neuron[layer][i][j] = 1.0 * (-1.0 + 2.0 * ((rand()%10000)/10000.0));
                 }
             }
             weights_bias[layer] = new T[n_nodes[layer+1]];
             for(long i=0;i<n_nodes[layer+1];i++)
             {
-                weights_bias[layer][i] = 10.0 * (-1.0 + 2.0 * ((rand()%10000)/10000.0));
+                weights_bias[layer][i] = 1.0 * (-1.0 + 2.0 * ((rand()%10000)/10000.0));
             }
         }
 
@@ -1075,6 +1116,35 @@ struct Perceptron
         for(long i=0;i<n_labels;i++)
         {
             labels[i] = activation_values1[last_layer][i];
+        }
+        return labels;
+    }
+
+    T * model2(long n_elements,long n_labels,T * variables)
+    {
+        T * labels = new T[n_labels];
+        // initialize input activations
+        for(long i=0;i<n_nodes[0];i++)
+        {
+            activation_values3[0][i] = variables[i];
+        }
+        // forward propagation
+        for(long layer = 0; layer < n_layers; layer++)
+        {
+            for(long i=0;i<n_nodes[layer+1];i++)
+            {
+                T sum = weights_bias[layer][i];
+                for(long j=0;j<n_nodes[layer];j++)
+                {
+                    sum += activation_values3[layer][j] * weights_neuron[layer][i][j];
+                }
+                activation_values3[layer+1][i] = sigmoid(sum,0);// <- zero is important here!!!!
+            }
+        }
+        long last_layer = n_nodes.size()-2;
+        for(long i=0;i<n_labels;i++)
+        {
+            labels[i] = activation_values3[last_layer][i];
         }
         return labels;
     }
@@ -1159,7 +1229,7 @@ struct Perceptron
             quasi_newton->weights_neuron = weights_neuron;
             quasi_newton->weights_bias = weights_bias;
             quasi_newton->init_QuasiNewton();
-            quasi_newton->quasi_newton_update = true;
+            quasi_newton->quasi_newton_update = false;
         }
         else
         {
@@ -1229,11 +1299,19 @@ struct Perceptron
             final_error = verify(n_test_elements,n_variables,test_variables,n_labels,test_labels);
             static int cnt1 = 0;
             if(cnt1%100==0)
-            std::cout << iter << "\tquasi_newton_update=" << quasi_newton->quasi_newton_update << "\ttype=" << sigmoid_type << "\tepsilon=" << epsilon << "\talpha=" << alpha << '\t' << "error=" << error << "\tdiff=" << (error-perror) << "\t\%error=" << 100*error/n_elements << "\ttest\%error=" << 100*final_error << "\tindex=" << index/n_elements << std::endl;
+            std::cout << iter << "\ttrain index=" << train_index << "\tdamp weight=" << damp_weight << "\tquasi_newton_update=" << quasi_newton->quasi_newton_update << "\ttype=" << sigmoid_type << "\tepsilon=" << epsilon << "\talpha=" << alpha << '\t' << "error=" << error << "\tdiff=" << (error-perror) << "\t\%error=" << 100*error/n_elements << "\ttest\%error=" << 100*final_error << "\tindex=" << index/n_elements << std::endl;
             cnt1++;
             perror = error;
             errs.push_back(error/n_elements);
             test_errs.push_back(final_error);
+            if(error/n_elements < 0.1)
+            {
+                train_index = (train_index+1)%n_labels;//round(index/n_elements);
+            }
+            //if(train_index<0||train_index>=n_elements-1)
+            //{
+            //    train_index = 0;
+            //}
             if(init)
             {
                 ierror = error;
@@ -1250,14 +1328,14 @@ struct Perceptron
             if(stop_training){stop_training=false;break;}
 
             // MARK!!!
-            if(error/n_elements < 0.1 && iter > n_iterations)
-            {
-              std::stringstream ss;
-              ss << "snapshots/network.ann." << ((int)(100*10000*final_error)/10000.0f);
-              dump_to_file(ss.str());
-              dump_to_file("network.ann");
-              exit(1);
-            }
+            //if(error/n_elements < 0.05 && iter > n_iterations)
+            //{
+            //  std::stringstream ss;
+            //  ss << "snapshots/network.ann." << ((int)(100*10000*final_error)/10000.0f);
+            //  dump_to_file(ss.str());
+            //  dump_to_file("network.ann");
+            //  exit(1);
+            //}
 
             //char ch;
             //std::cin >> ch;
@@ -1587,6 +1665,11 @@ struct RBM
     for(int t=2;t<3&&t<errs.size();t++)
       *err += (errs[errs.size()+1-t]-*err)/t;
     errs.push_back(*err);
+    test_errs.push_back(*err);
+    static int cnt2 = 0;
+    //if(cnt2%100==0)
+    //std::cout << "rbm error=" << errs[0] << std::endl;
+    cnt2++;
     boost::posix_time::ptime time_5(boost::posix_time::microsec_clock::local_time());
     boost::posix_time::time_duration duration54(time_5 - time_4);
     //std::cout << "cd timing 5:" << duration54 << '\n';
@@ -2357,6 +2440,7 @@ struct price
 
   price()
   {
+    prediction_confidence = 0;
     synthetic = false;
     EMA = 0;
     EMA1 = 0;
@@ -2377,6 +2461,9 @@ struct price
   double prct_change;
   double prct_prediction;
   double close_prediction;
+  double auto_encoding_x;
+  double auto_encoding_y;
+  double prediction_confidence;
 
   // these quantities are derived from the values above
   
@@ -3144,12 +3231,16 @@ struct price
   {
     prices[0].prev_close = prices[0].close;
     prices[0].prct_change = 0;
+    prices[0].auto_encoding_x = 0;
+    prices[0].auto_encoding_y = 0;
     prices[0].close_prediction = prices[0].close;
     prices[0].prct_prediction = 0;
     for(int i=1;i<prices.size();i++)
     {
       prices[i].prev_close = prices[i-1].close;
       prices[i].prct_change = (prices[i].close - prices[i-1].close) / prices[i-1].close;
+      prices[i].auto_encoding_x = 0;
+      prices[i].auto_encoding_y = 0;
       prices[i].close_prediction = prices[i-1].close;
       prices[i].prct_prediction = 0;
     }
@@ -3209,6 +3300,7 @@ struct Scanner
 
 bool comparator(price a,price b){return a.close < b.close;}
 bool comparator_MACD(price a,price b){return a.MACD_dline < b.MACD_dline;}
+bool comparator_auto(price a,price b){return a.auto_encoding_x < b.auto_encoding_x;}
 bool comparator_low(price a,price b){return a.low < b.low;}
 bool comparator_high(price a,price b){return a.high < b.high;}
 
@@ -3589,11 +3681,15 @@ struct Robot
   }
   long get_output_size(long range)
   {
-    return num_out_bits*(range-1);
+    std::vector<double> output;
+    return output.size()+num_bits*(range);
+    //return num_out_bits*(range-1);
   }
   void encode(std::vector<double> & vec,double dat,double min_dat,double max_dat,long num)
   {
     
+    if(dat<0.25*min_dat)dat=0.25*min_dat+1e-5;
+    if(dat>0.25*max_dat)dat=0.25*max_dat-1e-5;
     if(dat<min_dat)dat=min_dat+1e-5;
     if(dat>max_dat)dat=max_dat-1e-5;
     double val = ((dat-min_dat)/(max_dat-min_dat));
@@ -3620,7 +3716,9 @@ struct Robot
     std::vector<double> output;
     for(int i=0;i<next.size();i++)
     {
-      encode(output,100*next[i].prct_change,-2,2,num_out_bits);
+      {
+        encode(output,100*next[i].prct_change,-2,2,num_out_bits);
+      }
     }
     return output;
   }
@@ -3776,9 +3874,9 @@ User * user = NULL;
 
 long learning_samples = 0;
 long test_learning_samples = 0;
-int input_learning_range = 5;
-int output_learning_range = 2;
-int synthetic_range = 60;
+int  input_learning_range = 6;
+int output_learning_range = 6;
+int synthetic_range = 26;
 int learning_offset = 1;
 int learning_num = 600;
 int test_learning_num = 100;
@@ -3796,18 +3894,18 @@ void reconstruct(std::vector<price> & prices,int index)
       && in_dump 
       && out_dump 
       && prices[index].synthetic == false 
-      && index+     synthetic_range*learning_offset<prices.size() 
+      && index+     synthetic_range*learning_offset<prices.size()+1
       && index-input_learning_range*learning_offset>=0
        )
     {
       int  in_size = robot-> get_input_size( input_learning_range);
       int out_size = robot->get_output_size(output_learning_range);
       {
-        for(int j=0;j<synthetic_range;j++)
+        for(int j=0;j+1<synthetic_range;j++)
         {
             double * in = new double[in_size];
             //std::cout << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" << std::endl;
-            for(int i=index+j,k=0;k<input_learning_range;i-=learning_offset,k++)
+            for(int i=index+1+j,k=0;k<input_learning_range;i-=learning_offset,k++)
             {
                 in[k] = 100*((prices[i].synthetic)?prices[i].prct_prediction:prices[i].prct_change);
                 if(in[k]<-2)in[k]=-2;
@@ -3816,18 +3914,105 @@ void reconstruct(std::vector<price> & prices,int index)
                 in[k]/=4;
                 //std::cout << "k=" << k << "\tin=" << in[k] << std::endl;
             }
-            double * dat = perceptron->model(in_size,out_size,&in[0]);
+            double val = 0.5;
+            double tmp = 0;
+            double tru = in[0];
+            double min_D = tru-delta_D;
+            double max_D = tru+delta_D;
+            //if(prices[index+j*learning_offset].synthetic)
+            {
+              min_D = 0.3;
+              max_D = 0.7;
+            }
+            {
+                double err = 1e12;
+                for(double D=min_D;D<=max_D;D+=0.05)
+                {
+                  double * tmp_in = new double[in_size];
+                  for(int i=0;i<in_size;i++)
+                  {
+                    tmp_in[i] = in[i];
+                  }
+                  tmp_in[0] = D;
+                  for(int iter=0;iter<100;iter++)
+                  {
+                    double * dat = perceptron->model(in_size,out_size,&tmp_in[0]);
+                    for(int i=0;i<in_size;i++)
+                    {
+                      tmp_in[i] = dat[i];
+                    }
+                    delete [] dat;
+                    dat = NULL;
+                  }
+                  double dat_err = 0;
+                  for(int i=1;i<out_size;i++)
+                  {
+                    dat_err += fabs(in[i] - tmp_in[i]);
+                  }
+                  {
+                    dat_err += fabs(D - tmp_in[0]);
+                  }
+                  if(dat_err<err)
+                  {
+                    err=dat_err;
+                    val=(prices[index+1+j].synthetic)?tmp_in[0]:in[0];
+                  }
+                  delete [] tmp_in;
+                  tmp_in = NULL;
+                }
+            }
+            //val = in[0];
             //std::cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$" << std::endl;
             //std::cout << "j=" << j << "\tdat=" << dat[0] << std::endl;
             //std::cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$" << std::endl;
-            dat[0] -= 0.5;
-            dat[0] *= 4;
-            dat[0] *= 0.01;
-            prices[index+j*learning_offset+1]. prct_prediction = dat[0];
+            val -= 0.5;
+            val *= 4;
+            val *= 0.01;
+            prices[index+j*learning_offset+1]. prct_prediction = val;
             prices[index+j*learning_offset+1].close_prediction = (j==0)
-                                                               ?  prices[index+j*learning_offset].close           *(1+dat[0])
-                                                               :  prices[index+j*learning_offset].close_prediction*(1+dat[0])
-                                                               ;
+                                                             ?  prices[index+j*learning_offset].close           *(1+val)
+                                                             :  prices[index+j*learning_offset].close_prediction*(1+val)
+                                                             ;
+            delete [] in;
+            in = NULL;
+        }
+      }
+    }
+}
+
+void reconstruct_rbm(std::vector<price> & prices,int index)
+{
+    if ( perceptron != NULL 
+      && in_dump 
+      && out_dump 
+      && prices[index].synthetic == false 
+      && index+     synthetic_range*learning_offset<prices.size() 
+      && index-input_learning_range*learning_offset>=0
+       )
+    {
+      int  in_size = robot-> get_input_size( input_learning_range);
+      int out_size = robot->get_output_size(output_learning_range);
+      {
+        {
+            double * in = new double[in_size];
+            for(int i=index,k=0;k<input_learning_range;i-=learning_offset,k++)
+            {
+                in[k] = 100*((prices[i].synthetic)?prices[i].prct_prediction:prices[i].prct_change);
+                if(in[k]<-2)in[k]=-2;
+                if(in[k]> 2)in[k]= 2;
+                in[k]+=2;
+                in[k]/=4;
+            }
+            double * dat = perceptron->model(in_size,out_size,&in[0]);
+            //dat[0] -= 0.5;
+            //dat[0] *= 4;
+            //dat[0] *= 0.01;
+            //for(int k=0;k<perceptron->n_nodes.size();k++)
+            //{
+            //  std::cout << k << "\t" << perceptron->n_nodes[k] << "\t" << perceptron->n_layers/2 << std::endl;
+            //}
+            prices[index].auto_encoding_x = 2*perceptron->activation_values1[perceptron->n_layers/2][0] - 1;
+            prices[index].auto_encoding_y = 2*perceptron->activation_values1[perceptron->n_layers/2][1] - 1;
             delete [] dat;
             delete [] in;
             dat = NULL;
@@ -3835,6 +4020,31 @@ void reconstruct(std::vector<price> & prices,int index)
         }
       }
     }
+}
+
+void dump_autoencoding_to_file(std::string filename,bool quiet=false)
+{
+    if(!quiet)
+      std::cout << "dump autoencoding to file:" << filename << std::endl;
+    ofstream myfile (filename.c_str());
+    if (myfile.is_open())
+    {
+      for(int stock=0;stock<prices.size();stock++)
+      {
+        for(int i=0;i<prices[stock].size();i++)
+        {
+          reconstruct_rbm(prices[stock],i);
+          myfile << prices[stock][i].auto_encoding_x << " " << prices[stock][i].auto_encoding_y << " " << stock << " " << i << std::endl;
+        }
+      }
+      myfile.close();
+    }
+    else
+    {
+      cout << "Unable to open file: " << filename << std::endl;
+      exit(1);
+    }
+
 }
 
 void draw_charts()
@@ -3893,6 +4103,7 @@ void draw_charts()
   std::string date = "";
   int price_index = (int)((size-n)+(((double)mouse_x/width)*(n)));
   reconstruct(prices[stock_index],price_index);
+  //reconstruct_rbm(prices[stock_index],price_index);
   if(price_index>=0&&price_index<prices[stock_index].size())
   {
     open_price  = prices[stock_index][prices[stock_index].size()-1].open;
@@ -3961,6 +4172,9 @@ void draw_charts()
   double MACD_min= double(std::min_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_MACD)->MACD_dline);
   double MACD_max= double(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_MACD)->MACD_dline);
   double MACD_cmp= max(fabs(MACD_min),fabs(MACD_max));
+  double auto_min= 0;
+  double auto_max= 1;
+  double auto_cmp= 1;
   //std::cout << MACD_min << "\t" << MACD_max << std::endl;
   double vfactor = 2.0f/(vmax-vmin);
   double vfactor_volume = 2.0f/double(std::max_element(prices[stock_index].begin()+(int)(size-n),prices[stock_index].begin()+(int)(size),comparator_volume)->volume);
@@ -4000,6 +4214,13 @@ void draw_charts()
   glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].MACD_dline/MACD_cmp+-0.01f+-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*(prices[stock_index][price_index].MACD_dsignal)/MACD_cmp       +1.0f-2.0f*mouse_y/height,0);
   glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].MACD_dline/MACD_cmp       +-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*(prices[stock_index][price_index].MACD_dsignal)/MACD_cmp+ 0.01f+1.0f-2.0f*mouse_y/height,0);
   glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].MACD_dline/MACD_cmp       +-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*(prices[stock_index][price_index].MACD_dsignal)/MACD_cmp+-0.01f+1.0f-2.0f*mouse_y/height,0);
+  glEnd();
+  glBegin(GL_LINES);
+  glColor3f(1.0,1.0,0.0);
+  glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].auto_encoding_x/auto_cmp+ 0.01f+-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*prices[stock_index][price_index].auto_encoding_y/auto_cmp       +1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].auto_encoding_x/auto_cmp+-0.01f+-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*prices[stock_index][price_index].auto_encoding_y/auto_cmp       +1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].auto_encoding_x/auto_cmp       +-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*prices[stock_index][price_index].auto_encoding_y/auto_cmp+ 0.01f+1.0f-2.0f*mouse_y/height,0);
+  glVertex3f(-chart_size+chart_size*prices[stock_index][price_index].auto_encoding_x/auto_cmp       +-1.0f+2.0f*mouse_x/width,-chart_size+chart_size*prices[stock_index][price_index].auto_encoding_y/auto_cmp+-0.01f+1.0f-2.0f*mouse_y/height,0);
   glEnd();
   glBegin(GL_LINES);
   // MACD spiral
@@ -4119,7 +4340,14 @@ void draw_charts()
   for(int i=1,j=0;i<n;i++,j++)
   if(!prices[stock_index][size-i+1].synthetic)
   {
-    glColor3f(1,1,0);
+    if(prices[stock_index][size-i+1].prediction_confidence>0.5)
+    {
+        glColor3f(1,1,0);
+    }
+    else
+    {
+        glColor3f(.1,.1,0);
+    }
     // price
     glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close_prediction-vmin) ,0);
     glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].close_prediction-vmin) ,0);
@@ -4163,7 +4391,14 @@ void draw_charts()
   }
   else
   {
-    glColor3f(1,1,0);
+    if(prices[stock_index][size-i+1].prediction_confidence>0.5)
+    {
+        glColor3f(1,1,0);
+    }
+    else
+    {
+        glColor3f(.1,.1,0);
+    }
     // price
     glVertex3f(1.0f- j   *factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i+1].close_prediction-vmin) ,0);
     glVertex3f(1.0f-(j+1)*factor, 0.0f+0.5f*vfactor       *(prices[stock_index][size-i  ].close_prediction-vmin) ,0);
@@ -4244,7 +4479,7 @@ long construct_learning_data(int start,int num,int offset,double * in_dump,doubl
         robot->generate ( symbols[stock_index]
                         , prices[stock_index][size-ind]
                         , prev_prcs
-                        , next_prcs
+                        , prev_prcs // next_prcs
                         , in_off
                         , out_off
                         , in_dump
@@ -4382,6 +4617,84 @@ void draw_energy()
 
 }
 
+double min_D=0;
+double max_D=1;
+int selection_mode = 0;
+
+void evaluate_prediction()
+{
+    if(perceptron != NULL)
+    {
+        std::cout << "Evaluating prediction confidence" << std::endl;
+        int  in_size = robot-> get_input_size( input_learning_range);
+        int out_size = robot->get_output_size(output_learning_range);
+        for(int stock=0;stock<prices.size();stock++)
+        {
+            for(int index=0;index<prices[stock].size();index++)
+            {
+                std::cout << symbols[stock] << '\t' << index << std::endl;
+                double * in = new double[in_size];
+                bool go = true;
+                for(int i=index+1,k=0;k<input_learning_range;i-=learning_offset,k++)
+                {
+                    if(i<0||i>=prices[stock].size())
+                    {
+                        go = false;
+                        break;
+                    }
+                    in[k] = 100*((prices[stock][i].synthetic)?prices[stock][i].prct_prediction:prices[stock][i].prct_change);
+                    if(in[k]<-2)in[k]=-2;
+                    if(in[k]> 2)in[k]= 2;
+                    in[k]+=2;
+                    in[k]/=4;
+                }
+                if(!go)continue;
+                double dat_min_err = 1e10;
+                double del2 = 0.05;
+                for(double D=0.0;D<=1.0;D+=del2)
+                {
+                  double * tmp_in = new double[in_size];
+                  for(int i=0;i<in_size;i++)
+                  {
+                    tmp_in[i] = in[i];
+                  }
+                  tmp_in[0] = D;
+                  for(int iter=0;iter<100;iter++)
+                  {
+                    double * dat = perceptron->model2(in_size,out_size,&tmp_in[0]);
+                    for(int i=0;i<in_size;i++)
+                    {
+                      tmp_in[i] = dat[i];
+                    }
+                    delete [] dat;
+                    dat = NULL;
+                  }
+                  double dat_err = 0;
+                  for(int j=1;j<out_size;j++)
+                  {
+                    dat_err += fabs(in[j] - tmp_in[j]);
+                  }
+                  {
+                    dat_err += fabs(D - tmp_in[0]);
+                  }
+                  {
+                    if(dat_err < dat_min_err)
+                    {
+                      dat_min_err = dat_err;
+                      prices[stock][index+1].prediction_confidence = (fabs(D - in[0])<0.11)?1:0;
+                    }
+                  }
+                  delete [] tmp_in;
+                  tmp_in = NULL;
+                }
+                delete [] in;
+                in = NULL;
+            }
+        }
+        std::cout << "Done" << std::endl;
+    }
+}
+
 void draw_learning_progress()
 {
   if(in_dump&&out_dump)
@@ -4463,42 +4776,164 @@ void draw_learning_progress()
     if(perceptron != NULL)
     {
       {
-        if(err_stats == NULL)
-        {
-          err_stats = new double[out_size];
-          for(int x=0;x<out_size;x++)
-          {
-            err_stats[x] = 0.5; 
-          }
-        }
+        //if(err_stats == NULL)
+        //{
+        //  err_stats = new double[out_size];
+        //  for(int x=0;x<out_size;x++)
+        //  {
+        //    err_stats[x] = 0.5; 
+        //  }
+        //}
         double dx=0.5f/out_size;
-        double * dat = perceptron->model(in_size,out_size,&in_dump[in_size*learning_selection]);
-        if(err_stats_changed)
+        double * in = new double[in_size];
+        double * dat_fin = new double[in_size];
+        for(int i=0;i<in_size;i++)
         {
-          err_stats_changed = false;
-          for(int x=0;x<out_size;x++)
-          {
-            err_stats[x] += ((((dat[x]>0.5&&out_dump[out_size*learning_selection+x]>0.5)||
-                               (dat[x]<0.5&&out_dump[out_size*learning_selection+x]<0.5)
-                              )?1.0:0.0
-                             )-err_stats[x]
-                            )/err_stats_cnt; 
-          }
-          err_stats_cnt++;
-          if(err_stats_cnt>100)err_stats_cnt=100;
+          in[i] = in_dump[in_size*learning_selection+i];
         }
-        glColor3f(1,1,1);
-        for(int x=0;x<out_size;x++)
+        double tru_err=100;
+        double dat_err=0;
+        int it = 0;
+        glBegin(GL_LINES);
+        double tru = in[0];
+        double T = 0;
+        double R = 0;
         {
-          std::stringstream ss;
-          ss << (int)(1000*err_stats[x])/10.0f << "%";
-          drawString(GLUT_BITMAP_HELVETICA_18,ss.str().c_str(),-1.0f+1+0.2,-1+.3+0.05*x,0);
+            //double del = 0.01;
+            //int n_distribution = (int)(1/del);
+            //double * distribution = new double[n_distribution];
+            //for(int i=0;i<n_distribution;i++)
+            //{
+            //    distribution[i] = 1;
+            //}
+            //double count = 0;
+            //for(int i=0;i<n_distribution;i++)
+            //{
+            //    count += distribution[i];
+            //}
+            //for(int iter=0;iter<10000;iter++)
+            //{
+            //    //std::cout << "iter=" << iter << std::endl;
+            //    double ret = 0;
+            //    int it = 0;
+            //    for(;it<n_distribution;it++)
+            //    {
+            //        double D = 0.3+0.4*((rand()%10000)/10000.0);
+            //        in[0] = D;
+            //        double * dat = perceptron->model(in_size,out_size,&in[0]);
+            //        ret += distribution[it] * dat[0] / count;
+            //        int I = dat[0]*n_distribution;
+            //        if(I>=0&&I<n_distribution)
+            //        distribution[I]++;
+            //        count++;
+            //        delete [] dat;
+            //        dat = NULL;
+            //    }
+            //    double max_distribution = 0;
+            //    for(int i=0;i<n_distribution;i++)
+            //    {
+            //        if(distribution[i]>max_distribution)
+            //        {
+            //            max_distribution = distribution[i];
+            //            R = i*del;
+            //        }
+            //    }
+            //}
+            //std::cout << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~" << std::endl;
+            //for(int i=0;i<n_distribution;i++)
+            //{
+            //    std::cout << i << "\t" << distribution[i] << std::endl;
+            //}
+            ////char ch;
+            ////std::cin >> ch;
+            //delete [] distribution;
+            double prev_dat_err=1;
+            double dat_min_err = 1e10;
+            double del2 = 0.01;
+            for(double D=0.0;D<=1.0;D+=del2)
+            {
+              double * tmp_in = new double[in_size];
+              for(int i=0;i<in_size;i++)
+              {
+                tmp_in[i] = in[i];
+              }
+              tmp_in[0] = D;
+              for(int iter=0;iter<1000;iter++)
+              {
+                double * dat = perceptron->model(in_size,out_size,&tmp_in[0]);
+                for(int i=0;i<in_size;i++)
+                {
+                  tmp_in[i] = dat[i];
+                }
+                delete [] dat;
+                dat = NULL;
+              }
+              dat_err = 0;
+              for(int j=1;j<out_size;j++)
+              {
+                dat_err += fabs(in[j] - tmp_in[j]);
+              }
+              {
+                dat_err += fabs(D - tmp_in[0]);
+              }
+              glColor3f(1,1,1);
+              glVertex3f(-1+2*(D-del2),-1+2*prev_dat_err,0);
+              glVertex3f(-1+2*(D),-1+2*dat_err,0);
+              prev_dat_err=dat_err;
+              {
+                if(dat_err < dat_min_err)
+                {
+                  T = D;
+                  dat_min_err = dat_err;
+                  for(int j=0;j<out_size;j++)
+                  {
+                    dat_fin[j] = tmp_in[j];
+                  }
+                }
+              }
+              delete [] tmp_in;
+              tmp_in = NULL;
+            }
+        }
+        {
+              double * tmp_in = new double[in_size];
+              for(int i=0;i<in_size;i++)
+              {
+                tmp_in[i] = in[i];
+              }
+              tmp_in[0] = T;
+              for(int iter=0;iter<1000;iter++)
+              {
+                double * dat = perceptron->model(in_size,out_size,&tmp_in[0]);
+                for(int i=0;i<in_size;i++)
+                {
+                  tmp_in[i] = dat[i];
+                }
+                delete [] dat;
+                dat = NULL;
+              }
+              delete [] tmp_in;
+              tmp_in = NULL;
+        }
+        glColor3f(1,1,0);
+        glVertex3f(-1+2*tru,-1,0);
+        glVertex3f(-1+2*tru,1,0);
+        glColor3f(0,1,0);
+        glVertex3f(-1+2*T,-1,0);
+        glVertex3f(-1+2*T,1,0);
+        glColor3f(0,0,1);
+        glVertex3f(-1+2*R,-1,0);
+        glVertex3f(-1+2*R,1,0);
+        glEnd();
+        if(fabs(T-tru) > 0.05)
+        {
+            learning_selection++;if(learning_selection>=learning_samples)learning_selection=0;
         }
         {
           glBegin(GL_QUADS);
           for(int x=0;x<out_size;x++)
           {
-              double val = dat[x];
+              double val = dat_fin[x];
               glColor3f(val,val,val);
               glVertex3f(-1+1+0.2+ x   *dx,-1+.2+0.02     ,0);
               glVertex3f(-1+1+0.2+(x+1)*dx,-1+.2+0.02     ,0);
@@ -4507,8 +4942,10 @@ void draw_learning_progress()
           }
           glEnd();
         }
-        delete [] dat;
-        dat = NULL;
+        delete [] dat_fin;
+        delete [] in;
+        dat_fin = NULL;
+        in = NULL;
 
         for(int layer=0;layer<perceptron->n_nodes.size();layer++)
         {
@@ -4641,9 +5078,32 @@ void run_perceptron()
     std::cout << "learning samples: " << learning_samples << "\t" << test_learning_samples << std::endl;
     int  num_inputs = robot-> get_input_size(input_learning_range);
     int num_outputs = robot->get_output_size(output_learning_range);
+    std::vector<int> layer;
+    int N = 21;
+    layer.push_back(N);
+    layer.push_back(N);
+    //layer.push_back(N);
+    //while(N>2)
+    //{
+    //  N -= 2;
+    //  if(N>=2)
+    //  {
+    //    layer.push_back(N);
+    //  }
+    //}
     std::vector<int> num_hidden;
-    num_hidden.push_back(21);
-    num_hidden.push_back(21);
+    for(int i=0;i<layer.size();i++)
+    {
+      num_hidden.push_back(layer[i]);
+    }
+    for(int i=0;i+1<layer.size();i++)
+    {
+      num_hidden.push_back(layer[(int)layer.size()-2-i]);
+    }
+    //for(int i=0;i<num_hidden.size();i++)
+    //{
+    //  std::cout << i << "\t" << num_hidden[i] << std::endl;
+    //}
     long num_ann_iters = 100000;
     std::vector<long> nodes;
     nodes.push_back(num_inputs); // inputs
@@ -4651,7 +5111,25 @@ void run_perceptron()
       nodes.push_back(num_hidden[h]); // hidden layer
     nodes.push_back(num_outputs); // output layer
     nodes.push_back(num_outputs); // outputs
-    int n_prptn = 1000;
+
+    //std::vector<RBM*> rbms;
+    //double ** out = new double*[num_hidden.size()/2+1];
+    //for(int r=0;r<num_hidden.size()/2+1;r++)
+    //{
+    //    RBM * rbm = new RBM((r==0)?num_inputs:num_hidden[r-1],num_hidden[r],learning_samples,(r==0)?in_dump:out[r-1]);
+    //    int n_iters = 20000;
+    //    for(int i=0;i<n_iters;i++)
+    //    {
+    //      if(i%100==0)std::cout << i << "\t" << n_iters << std::endl;
+    //      rbm->init(0);
+    //      rbm->cd(1+(int)(i/6000),0.1,0);
+    //    }
+    //    rbms.push_back(rbm);
+    //    out[r] = new double[num_hidden[r]*learning_samples];
+    //    rbm->vis2hid((r==0)?in_dump:out[r-1],out[r]);
+    //}
+
+    int n_prptn = 1;//000;
     perceptron_tmp = new Perceptron<double>(nodes);
     Perceptron<double> ** p = new Perceptron<double>*[n_prptn];
     double min_err = 1e10;
@@ -4660,15 +5138,46 @@ void run_perceptron()
     for(int i=0;i<n_prptn;i++)
     {
         p[i] = new Perceptron<double>(nodes);
-        p[i]->epsilon = 1e-5;
-        p[i]->alpha = 1;
-        p[i]->sigmoid_type = 1;
+        p[i]->epsilon = 0.01;
+        p[i]->alpha = 0.01;
+        p[i]->sigmoid_type = 0;
         if(input_filename.size()>0)
         {
           p[i]->load_from_file(input_filename);
         }
         perceptron = p[i];
-        p[i]->train(p[i]->sigmoid_type,p[i]->epsilon,1000,learning_samples,test_learning_samples,num_inputs,in_dump,in_test,num_outputs,out_dump,out_test,(i==0)?NULL:p[0]->quasi_newton);
+        {
+            //int layer = 0;
+            //for(int r=0;r<rbms.size();r++)
+            //{
+            //  {
+            //    for(int i=0;i<nodes[layer+1];i++)
+            //    {
+            //      for(int j=0;j<nodes[layer];j++)
+            //      {
+            //        perceptron->weights_neuron[layer][i][j] = rbms[r]->W[j*rbms[r]->h+i];
+            //      }
+            //      perceptron->weights_bias[layer][i] = rbms[r]->c[i];
+            //    }
+            //  }
+            //  layer++;
+            //}
+            //for(int r=rbms.size()-1;r>=0;r--)
+            //{
+            //  {
+            //    for(int i=0;i<nodes[layer+1];i++)
+            //    {
+            //      for(int j=0;j<nodes[layer];j++)
+            //      {
+            //        perceptron->weights_neuron[layer][i][j] = rbms[r]->W[i*rbms[r]->h+j];
+            //      }
+            //      perceptron->weights_bias[layer][i] = rbms[r]->b[i];
+            //    }
+            //  }
+            //  layer++;
+            //}
+        }
+        //p[i]->train(p[i]->sigmoid_type,p[i]->epsilon,1000,learning_samples,test_learning_samples,num_inputs,in_dump,in_test,num_outputs,out_dump,out_test,(i==0)?NULL:p[0]->quasi_newton);
         if(p[i]->final_error<min_err)
         {
             min_err = p[i]->final_error;
@@ -4676,7 +5185,8 @@ void run_perceptron()
         }
     }
     perceptron = p[min_ind];
-    perceptron->train(perceptron->sigmoid_type,perceptron->epsilon,num_ann_iters,learning_samples,test_learning_samples,num_inputs,in_dump,in_test,num_outputs,out_dump,out_test,p[0]->quasi_newton);
+    //perceptron->train(perceptron->sigmoid_type,perceptron->epsilon,num_ann_iters,learning_samples,test_learning_samples,num_inputs,in_dump,in_test,num_outputs,out_dump,out_test,p[0]->quasi_newton);
+    evaluate_prediction();
 }
 
 bool training = false;
@@ -4684,6 +5194,17 @@ void keyboard(unsigned char key,int x,int y)
 {
   switch(key)
   {
+    case 't':delta_D *= 1.1;break;
+    case 'h':delta_D /= 1.1;break;
+    case 'n':selection_mode=(selection_mode+1)%3;
+             switch(selection_mode)
+             {
+                case 0:min_D=0.3;max_D=0.43;break;
+                case 1:min_D=0.43;max_D=0.56;break;
+                case 2:min_D=0.56;max_D=0.7;break;
+             }
+             break;
+    case 'x':dump_autoencoding_to_file("autoencoding.csv");break;
     case '5':continue_training=!continue_training;std::cout << "continue training:" << continue_training << std::endl;break;
     case '6':stop_training=!stop_training;std::cout << "stop training:" << stop_training << std::endl;break;
     case '-':x_dim--;std::cout << x_dim << "\t" << y_dim << '\t' << perceptron->get_num_variables() << std::endl;break;
@@ -4693,11 +5214,15 @@ void keyboard(unsigned char key,int x,int y)
     case '9':perceptron->dump_to_file("network.ann.new");break;
     case '0':perceptron->load_from_file("network.ann");break;
     case '\'':if(perceptron->quasi_newton!=NULL){perceptron->quasi_newton->quasi_newton_update=!perceptron->quasi_newton->quasi_newton_update;}break;
-    case ';':perceptron->sigmoid_type = (perceptron->sigmoid_type+1)%2;break;
+    case ';':perceptron->sigmoid_type = (perceptron->sigmoid_type+1)%3;break;
     case '3':perceptron->epsilon /= 1.1;break;
     case '4':perceptron->epsilon *= 1.1;break;
-    case '1':sample_index--;if(sample_index<0)sample_index=0;break;
-    case '2':sample_index++;if(sample_index>=robot->get_output_size(output_learning_range))sample_index=robot->get_output_size(output_learning_range)-1;break;
+    case '7':damp_weight /= 1.1;if(damp_weight>1)damp_weight=1;break;
+    case '8':damp_weight *= 1.1;if(damp_weight>1)damp_weight=1;break;
+    //case '1':sample_index--;if(sample_index<0)sample_index=0;break;
+    //case '2':sample_index++;if(sample_index>=robot->get_output_size(output_learning_range))sample_index=robot->get_output_size(output_learning_range)-1;break;
+    case '1':train_index--;if(train_index<0)train_index=0;break;
+    case '2':train_index++;if(train_index>=robot->get_output_size(output_learning_range))train_index=robot->get_output_size(output_learning_range)-1;break;
     case 'r':perceptron->alpha *= 1.1;perceptron->quasi_newton->alpha = perceptron->alpha; break;
     case 'f':perceptron->alpha /= 1.1;perceptron->quasi_newton->alpha = perceptron->alpha; break;
     case 'p':
@@ -4911,7 +5436,12 @@ int main(int argc,char ** argv)
 
   if(argc>=3)
   {
-    input_filename = std::string(argv[2]);
+    train_index = atoi(argv[2]);
+  }
+
+  if(argc>=4)
+  {
+    input_filename = std::string(argv[3]);
   }
 
   int seed;

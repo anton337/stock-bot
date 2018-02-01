@@ -1,6 +1,7 @@
 #!/bin/bash
 make;
-./stock-bot 4000 0 network.ann;
+#./stock-bot 4000 0 network.ann;
+./stock-bot 4000 0;
 #for ((number=11;number < 4000;number+=1))
 #{
 #  sleep .5

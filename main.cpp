@@ -1667,8 +1667,8 @@ struct RBM
     errs.push_back(*err);
     test_errs.push_back(*err);
     static int cnt2 = 0;
-    //if(cnt2%100==0)
-    //std::cout << "rbm error=" << errs[0] << std::endl;
+    if(cnt2%100==0)
+    std::cout << "rbm error=" << *err << std::endl;
     cnt2++;
     boost::posix_time::ptime time_5(boost::posix_time::microsec_clock::local_time());
     boost::posix_time::time_duration duration54(time_5 - time_4);
@@ -5086,6 +5086,7 @@ void run_perceptron()
     layer.push_back(N);
     layer.push_back(N);
     //layer.push_back(N);
+    //layer.push_back(N);
     //while(N>2)
     //{
     //  N -= 2;
@@ -5115,22 +5116,22 @@ void run_perceptron()
     nodes.push_back(num_outputs); // output layer
     nodes.push_back(num_outputs); // outputs
 
-    //std::vector<RBM*> rbms;
-    //double ** out = new double*[num_hidden.size()/2+1];
-    //for(int r=0;r<num_hidden.size()/2+1;r++)
-    //{
-    //    RBM * rbm = new RBM((r==0)?num_inputs:num_hidden[r-1],num_hidden[r],learning_samples,(r==0)?in_dump:out[r-1]);
-    //    int n_iters = 20000;
-    //    for(int i=0;i<n_iters;i++)
-    //    {
-    //      if(i%100==0)std::cout << i << "\t" << n_iters << std::endl;
-    //      rbm->init(0);
-    //      rbm->cd(1+(int)(i/6000),0.1,0);
-    //    }
-    //    rbms.push_back(rbm);
-    //    out[r] = new double[num_hidden[r]*learning_samples];
-    //    rbm->vis2hid((r==0)?in_dump:out[r-1],out[r]);
-    //}
+    std::vector<RBM*> rbms;
+    double ** out = new double*[num_hidden.size()/2+1];
+    for(int r=0;r<num_hidden.size()/2+1;r++)
+    {
+        RBM * rbm = new RBM((r==0)?num_inputs:num_hidden[r-1],num_hidden[r],learning_samples,(r==0)?in_dump:out[r-1]);
+        int n_iters = 20000;
+        for(int i=0;i<n_iters;i++)
+        {
+          if(i%100==0)std::cout << i << "\t" << n_iters << std::endl;
+          rbm->init(0);
+          rbm->cd(1+(int)(i/6000),0.1,0);
+        }
+        rbms.push_back(rbm);
+        out[r] = new double[num_hidden[r]*learning_samples];
+        rbm->vis2hid((r==0)?in_dump:out[r-1],out[r]);
+    }
 
     int n_prptn = 1;//000;
     perceptron_tmp = new Perceptron<double>(nodes);
@@ -5150,35 +5151,35 @@ void run_perceptron()
         }
         perceptron = p[i];
         {
-            //int layer = 0;
-            //for(int r=0;r<rbms.size();r++)
-            //{
-            //  {
-            //    for(int i=0;i<nodes[layer+1];i++)
-            //    {
-            //      for(int j=0;j<nodes[layer];j++)
-            //      {
-            //        perceptron->weights_neuron[layer][i][j] = rbms[r]->W[j*rbms[r]->h+i];
-            //      }
-            //      perceptron->weights_bias[layer][i] = rbms[r]->c[i];
-            //    }
-            //  }
-            //  layer++;
-            //}
-            //for(int r=rbms.size()-1;r>=0;r--)
-            //{
-            //  {
-            //    for(int i=0;i<nodes[layer+1];i++)
-            //    {
-            //      for(int j=0;j<nodes[layer];j++)
-            //      {
-            //        perceptron->weights_neuron[layer][i][j] = rbms[r]->W[i*rbms[r]->h+j];
-            //      }
-            //      perceptron->weights_bias[layer][i] = rbms[r]->b[i];
-            //    }
-            //  }
-            //  layer++;
-            //}
+            int layer = 0;
+            for(int r=0;r<rbms.size();r++)
+            {
+              {
+                for(int i=0;i<nodes[layer+1];i++)
+                {
+                  for(int j=0;j<nodes[layer];j++)
+                  {
+                    perceptron->weights_neuron[layer][i][j] = rbms[r]->W[j*rbms[r]->h+i];
+                  }
+                  perceptron->weights_bias[layer][i] = rbms[r]->c[i];
+                }
+              }
+              layer++;
+            }
+            for(int r=rbms.size()-1;r>=0;r--)
+            {
+              {
+                for(int i=0;i<nodes[layer+1];i++)
+                {
+                  for(int j=0;j<nodes[layer];j++)
+                  {
+                    perceptron->weights_neuron[layer][i][j] = rbms[r]->W[i*rbms[r]->h+j];
+                  }
+                  perceptron->weights_bias[layer][i] = rbms[r]->b[i];
+                }
+              }
+              layer++;
+            }
         }
         //p[i]->train(p[i]->sigmoid_type,p[i]->epsilon,1000,learning_samples,test_learning_samples,num_inputs,in_dump,in_test,num_outputs,out_dump,out_test,(i==0)?NULL:p[0]->quasi_newton);
         if(p[i]->final_error<min_err)
